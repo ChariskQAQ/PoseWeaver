@@ -69,10 +69,13 @@ add_executable(RigEditor
   src/platform/texture.cpp
   src/platform/file_dialog.cpp
   src/editor/editor.cpp
+  src/editor/theme.cpp
+  src/editor/icons.cpp
   src/editor/panel_viewport.cpp
-  src/editor/panel_hierarchy.cpp
-  src/editor/panel_inspector.cpp
-  src/editor/panel_timeline.cpp)
+  src/editor/viewport_toolbar.cpp
+  src/editor/panel_tree.cpp
+  src/editor/panel_properties.cpp
+  src/editor/panel_dopesheet.cpp)
 target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR})
 target_link_libraries(RigEditor PRIVATE rigcore imgui)
 if(WIN32)

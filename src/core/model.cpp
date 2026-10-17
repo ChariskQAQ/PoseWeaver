@@ -273,6 +273,19 @@ void moveRowKeys(Animation& anim, bool isSlot, int index, float from, float to) 
     }
 }
 
+void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to) {
+    if (ch == Channel::Attachment) {
+        auto it = anim.slots.find(index);
+        if (it != anim.slots.end()) shiftKey(it->second.attachment, from, to);
+        return;
+    }
+    auto it = anim.bones.find(index);
+    if (it == anim.bones.end()) return;
+    if (ch == Channel::Rotate) shiftKey(it->second.rotate, from, to);
+    if (ch == Channel::Translate) shiftKey(it->second.translate, from, to);
+    if (ch == Channel::Scale) shiftKey(it->second.scale, from, to);
+}
+
 static void addTimes(std::vector<float>& out, const BoneTimeline& tl) {
     for (auto& k : tl.rotate) out.push_back(k.time);
     for (auto& k : tl.translate) out.push_back(k.time);

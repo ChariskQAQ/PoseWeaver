@@ -1,4 +1,5 @@
 #include "editor/editor.h"
+#include "editor/theme.h"
 
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -36,48 +37,6 @@ static bool saveScreenshot(GLFWwindow* window, const std::string& path) {
 }
 
 static void onError(int code, const char* desc) { std::fprintf(stderr, "GLFW error %d: %s\n", code, desc); }
-
-static void loadFonts(float scale) {
-    ImGuiIO& io = ImGui::GetIO();
-    const float size = 17.0f * scale;
-    static ImVector<ImWchar> ranges;
-    ImFontGlyphRangesBuilder builder;
-    builder.AddRanges(io.Fonts->GetGlyphRangesChineseFull());
-    static const ImWchar extra[] = {0x2000, 0x206F, 0x2190, 0x21FF, 0x25A0, 0x25FF, 0xFF00, 0xFFEF, 0};
-    builder.AddRanges(extra);
-    builder.BuildRanges(&ranges);
-
-    const char* candidates[] = {"C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf",
-                                "/System/Library/Fonts/PingFang.ttc",
-                                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"};
-    for (const char* path : candidates) {
-        if (!std::filesystem::exists(path)) continue;
-        ImFontConfig cfg;
-        cfg.OversampleH = 1;
-        cfg.PixelSnapH = true;
-        if (io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges.Data)) return;
-    }
-    ImFontConfig cfg;
-    cfg.SizePixels = size;
-    io.Fonts->AddFontDefault(&cfg);  // no CJK font found: Chinese labels will render as '?'
-}
-
-static void applyStyle(float scale) {
-    ImGui::StyleColorsDark();
-    ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 4;
-    s.FrameRounding = 3;
-    s.GrabRounding = 3;
-    s.TabRounding = 3;
-    s.FramePadding = ImVec2(6, 4);
-    s.ItemSpacing = ImVec2(7, 5);
-    s.Colors[ImGuiCol_WindowBg] = ImVec4(0.13f, 0.14f, 0.16f, 1);
-    s.Colors[ImGuiCol_ChildBg] = ImVec4(0.11f, 0.12f, 0.14f, 1);
-    s.Colors[ImGuiCol_Header] = ImVec4(0.85f, 0.55f, 0.15f, 0.35f);
-    s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.85f, 0.55f, 0.15f, 0.55f);
-    s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.85f, 0.55f, 0.15f, 0.75f);
-    s.ScaleAllSizes(scale);
-}
 
 struct Options {
     std::string open;        // project or image to open at startup
@@ -130,8 +89,8 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
-    applyStyle(scale);
-    loadFonts(scale);
+    theme::apply(scale);
+    theme::loadFonts(scale);
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 

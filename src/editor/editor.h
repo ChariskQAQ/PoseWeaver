@@ -4,32 +4,47 @@
 
 #include <imgui.h>
 
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 enum class Mode { Setup, Animate };
-enum class Tool { Rotate, Translate, Scale, CreateBone, MeshEdit, Weights };
+enum class Tool { Rotate, Translate, Scale, Pose, CreateBone, MeshEdit, Weights };
+enum class Axes { Local, Parent, World };
 
 struct Selection {
-    int bone = -1;
+    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image } kind = None;
+    int bone = -1;        // also set for slots/attachments (their bone), used by transform tools
     int slot = -1;
+    int attachment = -1;  // attachment index inside `slot`
+    int index = -1;       // animation or image index
     std::vector<int> vertices;  // selected mesh vertices (MeshEdit tool)
     void clear() { *this = Selection{}; }
 };
 
 // Mouse drag in the viewport.
 struct Drag {
-    enum Kind { None, Bone, Attachment, Vertices, BoxSelect, CreateBone, Paint, Pan } kind = None;
+    enum Kind { None, Bone, Attachment, Vertices, BoxSelect, CreateBone, Paint, BoneLength, PoseRotate } kind = None;
     ImVec2 startScreen;
     rig::Vec2 startWorld;
     rig::Vec2 pivotWorld;           // bone origin / attachment centre
     rig::Transform startTransform;  // bone local or attachment transform at drag start
     rig::Affine parentWorld;        // space the dragged transform lives in
     std::vector<rig::Vec2> startVertices;
+    Tool tool = Tool::Rotate;       // tool that started the drag
     int parentBone = -1;            // CreateBone
     bool moved = false;             // passed the drag threshold
     bool checkpointed = false;      // undo snapshot taken for this drag
 };
+
+// Animate-mode changes that have not been keyed yet (auto key off).
+struct PendingChange {
+    rig::Transform local;
+    bool rot = false, trans = false, scale = false;
+};
+
+enum class KeyState { None, Changed, Keyed };
 
 class Editor {
 public:
@@ -63,42 +78,69 @@ private:
     // --- editing state ---
     Mode mode_ = Mode::Setup;
     Tool tool_ = Tool::Rotate;
+    Tool prevTool_ = Tool::Translate;  // right click in the viewport swaps back to it
+    Axes axes_ = Axes::Local;
+    bool autoKey_ = true;
     Selection sel_;
     int anim_ = -1;  // current animation index
     float time_ = 0;
     bool playing_ = false;
+    int playDir_ = 1;  // 1 forward, -1 backward
     bool loop_ = true;
+    float speed_ = 1.0f;
     float fps_ = 30;
     rig::Pose pose_;  // what the viewport shows this frame
+    std::map<int, PendingChange> pending_;  // per bone
+    float pendingTime_ = -1;
+    int pendingAnim_ = -1;
 
     // --- view ---
     ImVec2 viewOffset_{0, 0};
     float zoom_ = 1.0f;
     ImVec2 canvasOrigin_, canvasSize_;
-    bool showBones_ = true, showImages_ = true, showMesh_ = true;
+    struct ViewOptions {
+        bool bonesVisible = true, bonesSelectable = true, boneNames = false;
+        bool imagesVisible = true, imagesSelectable = true;
+        bool meshVisible = true;
+    } view_;
+    std::set<int> hiddenBones_, hiddenSlots_;  // editor-only visibility
     Drag drag_;
     float uiScale_ = 1.0f;
+    ImVec2 rightClickStart_;
 
-    // --- timeline ---
-    struct TimelineRow {
-        enum Kind { Summary, Bone, Slot } kind;
-        int index;
+    // --- tree ---
+    std::string treeFilter_;
+    bool treeShowBones_ = true, treeShowSlots_ = true, treeShowAttachments_ = true;
+    bool scrollTreeToSelection_ = false;
+    std::string renameBuf_;
+    bool openRename_ = false;
+
+    // --- dopesheet ---
+    struct SheetRow {
+        enum Kind { Overview, Bone, Slot, Property } kind;
+        int index;                                  // bone or slot
+        rig::Channel channel = rig::Channel::Rotate;  // Property rows
     };
-    struct TimelineDrag {
+    struct SheetDrag {
         bool scrubbing = false;
         bool movingKey = false;
+        bool panning = false;
         bool checkpointed = false;
-        TimelineRow row{TimelineRow::Summary, -1};
+        SheetRow row{SheetRow::Overview, -1};
         float from = 0;
-    } tlDrag_;
-    TimelineRow tlMenuRow_{TimelineRow::Summary, -1};
-    float tlMenuTime_ = 0;
-    std::string renameBuf_;
+    } sheetDrag_;
+    SheetRow sheetMenuRow_{SheetRow::Overview, -1};
+    float sheetMenuTime_ = 0;
+    float sheetPps_ = 0;      // pixels per second, 0 = fit to width
+    float sheetScroll_ = 0;   // seconds scrolled off the left edge
+    bool sheetLocked_ = false;
+    std::vector<int> sheetLockedBones_;
+    std::set<int> collapsedBones_;
 
     // --- mesh / weights tools ---
     int gridCols_ = 6, gridRows_ = 6;
     float brushRadius_ = 40, brushStrength_ = 0.5f;
-    std::vector<int> bindBones_;  // bones checked in the bind dialog
+    std::vector<int> bindBones_;  // bones checked in the bind list
 
     // --- misc ---
     std::string status_;
@@ -108,37 +150,56 @@ private:
     bool showCloseDialog_ = false;
     bool closeConfirmed_ = false;
     bool showDemo_ = false;
+    bool resetLayout_ = false;
+    int focusWeights_ = 0;  // frames left to bring the Weights tab to front (docking settles over a few frames)
 
     // frame parts
     void handleShortcuts();
     void drawMenuBar();
-    void drawToolbar();
     void drawViewport();
-    void drawHierarchy();
-    void drawInspector();
-    void drawTimeline();
+    void drawTree();
+    void drawProperties();
+    void drawWeightsView();
+    void drawDopesheet();
     void drawStatusBar();
     void drawCloseDialog();
     void setupDockLayout(unsigned int dockspace);
 
-    // inspector sections
-    void inspectBone(int b);
-    void inspectSlot(int s);
-    void inspectAttachment(int s, int a);
-
-    // viewport helpers
+    // viewport parts (panel_viewport.cpp / viewport_toolbar.cpp)
+    void drawModeLabel();
+    void drawMainToolbar();
+    void drawZoomControls();
     ImVec2 toScreen(rig::Vec2 w) const;
     rig::Vec2 toWorld(ImVec2 s) const;
     int pickBone(ImVec2 screen) const;
     int pickSlot(rig::Vec2 world) const;
     int pickVertex(ImVec2 screen) const;
-    void viewportMouseDown(ImVec2 mouse, bool shift);
+    bool overBoneTip(ImVec2 screen) const;
+    void viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl);
     void viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt);
     void viewportMouseUp(ImVec2 mouse, bool shift);
     void drawSlots(ImDrawList* dl);
     void drawBones(ImDrawList* dl);
     void drawMeshOverlay(ImDrawList* dl);
     void frameAll();
+    void zoomTo(float zoom);
+    void setTool(Tool t);
+
+    // properties sections
+    void propertiesSkeleton();
+    void propertiesBone(int b);
+    void propertiesSlot(int s);
+    void propertiesAttachment(int s, int a);
+    void propertiesAnimation(int a);
+    void propertiesImage(int i);
+    bool propertiesHeader(int icon, const std::string& type, const std::string& name, bool canRename, bool canDelete);
+
+    // selection
+    void selectBone(int b);
+    void selectSlot(int s);
+    void selectAttachment(int s, int a);
+    void selectAnimation(int a);
+    void validateSelection();
 
     // document operations
     void newProject();
@@ -150,8 +211,9 @@ private:
     void reloadTextures();
     void deleteSelection();
     void removeSlot(int slot);
-    void moveSlot(int slot, int delta);  // change draw order
-    void validateSelection();
+    void moveSlot(int slot, int delta, bool snapshot = true);  // change draw order
+    int createAnimation();
+    void renameSelection(const std::string& name);
     void setStatus(const std::string& msg);
     std::string resolveImagePath(const std::string& stored) const;
 
@@ -159,10 +221,17 @@ private:
     void updatePose();
     rig::Animation* currentAnimation();
     float snapTime(float t) const;
-    // Applies a new local transform for a bone: edits setup in Setup mode, keys in Animate mode.
+    void setMode(Mode m);
+    void setTime(float t);
+    // Applies a new local transform for a bone: edits setup in Setup mode; in Animate mode
+    // keys it (auto key) or records it as a pending change.
     void setBoneLocal(int bone, const rig::Transform& local, bool rot, bool trans, bool scale);
     void keyBone(int bone, bool rot, bool trans, bool scale);
+    void keyPending();  // key every pending change ("Key edited")
+    KeyState boneKeyState(int bone, rig::Channel ch);
+    KeyState slotKeyState(int slot);
     void setSlotAttachment(int slot, int attachment);
     rig::Attachment* selectedAttachment();
-    bool canEditSetup() const { return mode_ == Mode::Setup; }
+    // Region attachment edited by the transform tools in Setup mode, if any.
+    rig::Attachment* transformTargetAttachment();
 };

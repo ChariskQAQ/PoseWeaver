@@ -122,6 +122,8 @@ void setKeyCurve(Animation& anim, int bone, Channel ch, float time, Curve curve)
 void moveKeys(Animation& anim, float from, float to);
 // Same, restricted to one bone's channels (isSlot = false) or one slot's channels.
 void moveRowKeys(Animation& anim, bool isSlot, int index, float from, float to);
+// Same, restricted to a single channel of one bone or slot.
+void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to);
 // Sorted, de-duplicated times of every key in the animation (or one row of it).
 std::vector<float> keyTimes(const Animation& anim);
 std::vector<float> rowKeyTimes(const Animation& anim, bool isSlot, int index);
