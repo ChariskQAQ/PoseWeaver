@@ -28,7 +28,11 @@ constexpr ImU32 kKeyKeyed = IM_COL32(232, 64, 64, 255);
 constexpr ImU32 kRotate = IM_COL32(92, 204, 92, 255);
 constexpr ImU32 kTranslate = IM_COL32(77, 158, 242, 255);
 constexpr ImU32 kScale = IM_COL32(235, 84, 84, 255);
+constexpr ImU32 kShear = IM_COL32(236, 200, 70, 255);
 constexpr ImU32 kAttachment = IM_COL32(186, 120, 242, 255);
+constexpr ImU32 kColor = IM_COL32(240, 120, 190, 255);
+constexpr ImU32 kDrawOrder = IM_COL32(120, 160, 255, 255);
+constexpr ImU32 kEvent = IM_COL32(170, 110, 235, 255);
 constexpr ImU32 kMixed = IM_COL32(240, 240, 240, 255);
 
 // Viewport.

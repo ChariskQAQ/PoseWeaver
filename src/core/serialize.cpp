@@ -2,6 +2,7 @@
 
 #include <json.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -10,15 +11,31 @@ using nlohmann::json;
 
 namespace rig {
 
-static constexpr int kFormatVersion = 1;
+// Version history:
+//   1  bones, slots, region/mesh attachments, rotate/translate/scale + attachment keys
+//   2  shear, Bezier curves, slot colour keys, draw order keys, events
+static constexpr int kFormatVersion = 2;
 
-static const char* curveName(Curve c) { return c == Curve::Stepped ? "stepped" : "linear"; }
-static Curve curveFrom(const json& j) {
-    return j.value("curve", std::string("linear")) == "stepped" ? Curve::Stepped : Curve::Linear;
+// Curves are written as "linear", "stepped" or [cx1, cy1, cx2, cy2] for Bezier.
+static json curveJson(const CurveShape& c) {
+    if (c.type == Curve::Stepped) return "stepped";
+    if (c.type == Curve::Bezier) return json::array({c.cx1, c.cy1, c.cx2, c.cy2});
+    return "linear";
+}
+static CurveShape curveFrom(const json& key) {
+    if (!key.contains("curve")) return {};
+    const json& c = key["curve"];
+    if (c.is_array() && c.size() == 4)
+        return CurveShape::bezier(c[0].get<float>(), c[1].get<float>(), c[2].get<float>(), c[3].get<float>());
+    if (c.is_string() && c.get<std::string>() == "stepped") return CurveShape::stepped();
+    return {};
 }
 
 static json transformJson(const Transform& t) {
-    return {{"x", t.x}, {"y", t.y}, {"rotation", t.rotation}, {"scaleX", t.scaleX}, {"scaleY", t.scaleY}};
+    json j{{"x", t.x}, {"y", t.y}, {"rotation", t.rotation}, {"scaleX", t.scaleX}, {"scaleY", t.scaleY}};
+    if (t.shearX != 0) j["shearX"] = t.shearX;
+    if (t.shearY != 0) j["shearY"] = t.shearY;
+    return j;
 }
 static Transform transformFrom(const json& j) {
     Transform t;
@@ -27,7 +44,16 @@ static Transform transformFrom(const json& j) {
     t.rotation = j.value("rotation", 0.0f);
     t.scaleX = j.value("scaleX", 1.0f);
     t.scaleY = j.value("scaleY", 1.0f);
+    t.shearX = j.value("shearX", 0.0f);
+    t.shearY = j.value("shearY", 0.0f);
     return t;
+}
+
+static json colorJson(const Color& c) { return json::array({c[0], c[1], c[2], c[3]}); }
+static Color colorFrom(const json& j) {
+    Color c;
+    for (int i = 0; i < 4 && i < (int)j.size(); ++i) c[i] = j[i].get<float>();
+    return c;
 }
 
 static json vecList(const std::vector<Vec2>& v) {
@@ -42,6 +68,19 @@ static std::vector<Vec2> vecListFrom(const json& a) {
     std::vector<Vec2> v;
     for (size_t i = 0; i + 1 < a.size(); i += 2) v.push_back({a[i].get<float>(), a[i + 1].get<float>()});
     return v;
+}
+
+static json vec2Keys(const std::vector<Vec2Key>& keys) {
+    json a = json::array();
+    for (auto& k : keys) a.push_back({{"time", k.time}, {"x", k.value.x}, {"y", k.value.y}, {"curve", curveJson(k.curve)}});
+    return a;
+}
+static std::vector<Vec2Key> vec2KeysFrom(const json& j, const char* name) {
+    std::vector<Vec2Key> keys;
+    if (!j.contains(name)) return keys;
+    for (auto& k : j[name])
+        keys.push_back({k.at("time").get<float>(), {k.at("x").get<float>(), k.at("y").get<float>()}, curveFrom(k)});
+    return keys;
 }
 
 std::string toJson(const Skeleton& sk, int indent) {
@@ -65,10 +104,7 @@ std::string toJson(const Skeleton& sk, int indent) {
 
     json slots = json::array();
     for (auto& s : sk.slots) {
-        json js{{"name", s.name},
-                {"bone", s.bone},
-                {"active", s.activeAttachment},
-                {"color", {s.color[0], s.color[1], s.color[2], s.color[3]}}};
+        json js{{"name", s.name}, {"bone", s.bone}, {"active", s.activeAttachment}, {"color", colorJson(s.color)}};
         json atts = json::array();
         for (auto& a : s.attachments) {
             json ja{{"name", a.name}, {"image", a.image}};
@@ -98,21 +134,30 @@ std::string toJson(const Skeleton& sk, int indent) {
     }
     root["slots"] = slots;
 
+    json events = json::array();
+    for (auto& e : sk.events) {
+        json je{{"name", e.name}, {"int", e.intValue}, {"float", e.floatValue}, {"string", e.stringValue}};
+        if (!e.audioPath.empty()) {
+            je["audio"] = e.audioPath;
+            je["volume"] = e.volume;
+            je["balance"] = e.balance;
+        }
+        events.push_back(je);
+    }
+    root["events"] = events;
+
     json anims = json::array();
     for (auto& an : sk.animations) {
         json ja{{"name", an.name}, {"duration", an.duration}};
         json bt = json::array();
         for (auto& [bi, tl] : an.bones) {
             json jt{{"bone", bi}};
-            json r = json::array(), t = json::array(), s = json::array();
-            for (auto& k : tl.rotate) r.push_back({{"time", k.time}, {"value", k.value}, {"curve", curveName(k.curve)}});
-            for (auto& k : tl.translate)
-                t.push_back({{"time", k.time}, {"x", k.value.x}, {"y", k.value.y}, {"curve", curveName(k.curve)}});
-            for (auto& k : tl.scale)
-                s.push_back({{"time", k.time}, {"x", k.value.x}, {"y", k.value.y}, {"curve", curveName(k.curve)}});
+            json r = json::array();
+            for (auto& k : tl.rotate) r.push_back({{"time", k.time}, {"value", k.value}, {"curve", curveJson(k.curve)}});
             jt["rotate"] = r;
-            jt["translate"] = t;
-            jt["scale"] = s;
+            jt["translate"] = vec2Keys(tl.translate);
+            jt["scale"] = vec2Keys(tl.scale);
+            if (!tl.shear.empty()) jt["shear"] = vec2Keys(tl.shear);
             bt.push_back(jt);
         }
         ja["bones"] = bt;
@@ -120,9 +165,26 @@ std::string toJson(const Skeleton& sk, int indent) {
         for (auto& [si, tl] : an.slots) {
             json keys = json::array();
             for (auto& k : tl.attachment) keys.push_back({{"time", k.time}, {"value", k.value}});
-            st.push_back({{"slot", si}, {"attachment", keys}});
+            json jt{{"slot", si}, {"attachment", keys}};
+            if (!tl.color.empty()) {
+                json ck = json::array();
+                for (auto& k : tl.color) ck.push_back({{"time", k.time}, {"color", colorJson(k.value)}, {"curve", curveJson(k.curve)}});
+                jt["color"] = ck;
+            }
+            st.push_back(jt);
         }
         ja["slots"] = st;
+        if (!an.drawOrder.empty()) {
+            json dk = json::array();
+            for (auto& k : an.drawOrder) dk.push_back({{"time", k.time}, {"order", k.order}});
+            ja["drawOrder"] = dk;
+        }
+        if (!an.events.empty()) {
+            json ek = json::array();
+            for (auto& k : an.events)
+                ek.push_back({{"time", k.time}, {"event", k.event}, {"int", k.intValue}, {"float", k.floatValue}, {"string", k.stringValue}});
+            ja["events"] = ek;
+        }
         anims.push_back(ja);
     }
     root["animations"] = anims;
@@ -134,7 +196,7 @@ static bool validate(const Skeleton& sk, std::string* error) {
         if (error) *error = m;
         return false;
     };
-    int nb = (int)sk.bones.size(), ns = (int)sk.slots.size(), ni = (int)sk.images.size();
+    int nb = (int)sk.bones.size(), ns = (int)sk.slots.size(), ni = (int)sk.images.size(), ne = (int)sk.events.size();
     for (int i = 0; i < nb; ++i) {
         int p = sk.bones[i].parent;
         if (p < -1 || p >= nb || p == i) return fail("bone " + sk.bones[i].name + ": invalid parent");
@@ -161,6 +223,16 @@ static bool validate(const Skeleton& sk, std::string* error) {
             if (bi < 0 || bi >= nb) return fail("animation " + an.name + ": invalid bone");
         for (auto& [si, tl] : an.slots)
             if (si < 0 || si >= ns) return fail("animation " + an.name + ": invalid slot");
+        for (auto& k : an.drawOrder) {
+            std::vector<bool> seen(ns, false);
+            if ((int)k.order.size() != ns) return fail("animation " + an.name + ": draw order key has wrong size");
+            for (int s : k.order) {
+                if (s < 0 || s >= ns || seen[s]) return fail("animation " + an.name + ": draw order key is not a permutation");
+                seen[s] = true;
+            }
+        }
+        for (auto& k : an.events)
+            if (k.event < 0 || k.event >= ne) return fail("animation " + an.name + ": invalid event");
     }
     return true;
 }
@@ -170,6 +242,10 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
         json root = json::parse(text);
         if (root.value("format", std::string()) != "rig") {
             if (error) *error = "not a rig file";
+            return false;
+        }
+        if (root.value("version", 1) > kFormatVersion) {
+            if (error) *error = "file was saved by a newer version (format " + std::to_string(root.value("version", 0)) + ")";
             return false;
         }
         Skeleton sk;
@@ -193,8 +269,7 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
             s.name = j.at("name").get<std::string>();
             s.bone = j.at("bone").get<int>();
             s.activeAttachment = j.value("active", -1);
-            if (j.contains("color"))
-                for (int i = 0; i < 4; ++i) s.color[i] = j["color"][i].get<float>();
+            if (j.contains("color")) s.color = colorFrom(j["color"]);
             for (auto& ja : j.at("attachments")) {
                 Attachment a;
                 a.name = ja.at("name").get<std::string>();
@@ -226,6 +301,19 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
             }
             sk.slots.push_back(s);
         }
+        if (root.contains("events")) {
+            for (auto& je : root["events"]) {
+                EventDef e;
+                e.name = je.at("name").get<std::string>();
+                e.intValue = je.value("int", 0);
+                e.floatValue = je.value("float", 0.0f);
+                e.stringValue = je.value("string", std::string());
+                e.audioPath = je.value("audio", std::string());
+                e.volume = je.value("volume", 1.0f);
+                e.balance = je.value("balance", 0.0f);
+                sk.events.push_back(e);
+            }
+        }
         for (auto& ja : root.at("animations")) {
             Animation an;
             an.name = ja.at("name").get<std::string>();
@@ -233,17 +321,34 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
             for (auto& jt : ja.at("bones")) {
                 BoneTimeline tl;
                 for (auto& k : jt.at("rotate")) tl.rotate.push_back({k.at("time").get<float>(), k.at("value").get<float>(), curveFrom(k)});
-                for (auto& k : jt.at("translate"))
-                    tl.translate.push_back({k.at("time").get<float>(), {k.at("x").get<float>(), k.at("y").get<float>()}, curveFrom(k)});
-                for (auto& k : jt.at("scale"))
-                    tl.scale.push_back({k.at("time").get<float>(), {k.at("x").get<float>(), k.at("y").get<float>()}, curveFrom(k)});
+                tl.translate = vec2KeysFrom(jt, "translate");
+                tl.scale = vec2KeysFrom(jt, "scale");
+                tl.shear = vec2KeysFrom(jt, "shear");
                 an.bones[jt.at("bone").get<int>()] = tl;
             }
             for (auto& jt : ja.at("slots")) {
                 SlotTimeline tl;
                 for (auto& k : jt.at("attachment")) tl.attachment.push_back({k.at("time").get<float>(), k.at("value").get<int>()});
+                if (jt.contains("color"))
+                    for (auto& k : jt["color"]) tl.color.push_back({k.at("time").get<float>(), colorFrom(k.at("color")), curveFrom(k)});
                 an.slots[jt.at("slot").get<int>()] = tl;
             }
+            if (ja.contains("drawOrder"))
+                for (auto& k : ja["drawOrder"]) an.drawOrder.push_back({k.at("time").get<float>(), k.at("order").get<std::vector<int>>()});
+            if (ja.contains("events")) {
+                for (auto& k : ja["events"]) {
+                    EventKey e;
+                    e.time = k.at("time").get<float>();
+                    e.event = k.at("event").get<int>();
+                    e.intValue = k.value("int", 0);
+                    e.floatValue = k.value("float", 0.0f);
+                    e.stringValue = k.value("string", std::string());
+                    an.events.push_back(e);
+                }
+            }
+            auto byTime = [](const auto& a, const auto& b) { return a.time < b.time; };
+            std::stable_sort(an.drawOrder.begin(), an.drawOrder.end(), byTime);
+            std::stable_sort(an.events.begin(), an.events.end(), byTime);
             sk.animations.push_back(an);
         }
         if (!validate(sk, error)) return false;

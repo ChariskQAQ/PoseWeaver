@@ -1,6 +1,7 @@
-// Dopesheet: overview row → bone rows → property rows, with playback controls.
+// Dopesheet: overview row → bone / slot rows → property rows, plus draw order and events.
 #include "editor/editor.h"
 
+#include "editor/channels.h"
 #include "editor/icons.h"
 #include "editor/theme.h"
 
@@ -12,68 +13,61 @@
 using namespace rig;
 
 namespace {
-enum KeyBits : unsigned { kRot = 1, kTrans = 2, kScale = 4, kAtt = 8 };
+constexpr Channel kBoneChannels[] = {Channel::Rotate, Channel::Translate, Channel::Scale, Channel::Shear};
+constexpr Channel kSlotChannels[] = {Channel::Attachment, Channel::Color};
 
 struct KeyMark {
     float time;
     unsigned mask;
 };
 
-void addMarks(std::vector<KeyMark>& out, float t, unsigned bit) {
+void addMark(std::vector<KeyMark>& out, float t, Channel ch) {
     for (auto& m : out)
         if (std::fabs(m.time - t) < kKeyEpsilon) {
-            m.mask |= bit;
+            m.mask |= channelBit(ch);
             return;
         }
-    out.push_back({t, bit});
+    out.push_back({t, channelBit(ch)});
 }
 
-void addBone(std::vector<KeyMark>& out, const BoneTimeline& tl, unsigned filter = kRot | kTrans | kScale) {
-    if (filter & kRot) for (auto& k : tl.rotate) addMarks(out, k.time, kRot);
-    if (filter & kTrans) for (auto& k : tl.translate) addMarks(out, k.time, kTrans);
-    if (filter & kScale) for (auto& k : tl.scale) addMarks(out, k.time, kScale);
+template <typename K>
+void addKeys(std::vector<KeyMark>& out, const std::vector<K>& keys, Channel ch) {
+    for (auto& k : keys) addMark(out, k.time, ch);
+}
+
+void addBone(std::vector<KeyMark>& out, const BoneTimeline& tl, Channel only = Channel::Event) {
+    bool all = only == Channel::Event;  // Event = "no filter" here
+    if (all || only == Channel::Rotate) addKeys(out, tl.rotate, Channel::Rotate);
+    if (all || only == Channel::Translate) addKeys(out, tl.translate, Channel::Translate);
+    if (all || only == Channel::Scale) addKeys(out, tl.scale, Channel::Scale);
+    if (all || only == Channel::Shear) addKeys(out, tl.shear, Channel::Shear);
+}
+
+void addSlot(std::vector<KeyMark>& out, const SlotTimeline& tl, Channel only = Channel::Event) {
+    bool all = only == Channel::Event;
+    if (all || only == Channel::Attachment) addKeys(out, tl.attachment, Channel::Attachment);
+    if (all || only == Channel::Color) addKeys(out, tl.color, Channel::Color);
 }
 
 ImU32 maskColor(unsigned mask) {
-    switch (mask) {
-    case kRot: return theme::kRotate;
-    case kTrans: return theme::kTranslate;
-    case kScale: return theme::kScale;
-    case kAtt: return theme::kAttachment;
-    default: return theme::kMixed;
-    }
+    for (int c = 0; c <= (int)Channel::Event; ++c)
+        if (mask == channelBit((Channel)c)) return channelColor((Channel)c);
+    return theme::kMixed;
 }
 
-unsigned channelBit(Channel ch) {
-    switch (ch) {
-    case Channel::Rotate: return kRot;
-    case Channel::Translate: return kTrans;
-    case Channel::Scale: return kScale;
-    default: return kAtt;
-    }
-}
-
-const char* channelName(Channel ch) {
-    switch (ch) {
-    case Channel::Rotate: return "旋转";
-    case Channel::Translate: return "移动";
-    case Channel::Scale: return "缩放";
-    default: return "附件";
-    }
-}
-
-Icon channelIcon(Channel ch) {
-    switch (ch) {
-    case Channel::Rotate: return Icon::Rotate;
-    case Channel::Translate: return Icon::Translate;
-    case Channel::Scale: return Icon::Scale;
-    default: return Icon::Region;
-    }
-}
+bool channelHasCurve(Channel ch) { return isBoneChannel(ch) || ch == Channel::Color; }
 
 void dashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
     float len = b.x - a.x;
     for (float x = 0; x < len; x += 6) dl->AddLine(ImVec2(a.x + x, a.y), ImVec2(a.x + std::min(x + 3, len), a.y), col, 1.5f);
+}
+
+bool sameValue(float a, float b) { return std::fabs(a - b) < 1e-4f; }
+bool sameValue(Vec2 a, Vec2 b) { return length(a - b) < 1e-4f; }
+bool sameValue(const Color& a, const Color& b) {
+    for (int i = 0; i < 4; ++i)
+        if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
+    return true;
 }
 } // namespace
 
@@ -194,12 +188,14 @@ void Editor::drawDopesheet() {
 
     // ---- rows ----
     std::vector<int> bones;
+    bool showAll = false;
     if (sheetLocked_) {
         for (int b : sheetLockedBones_)
             if (b < (int)sk_.bones.size()) bones.push_back(b);
-    } else if (sel_.bone >= 0 && sel_.kind != Selection::None && sel_.kind != Selection::Animation) {
+    } else if (sel_.bone >= 0 && (sel_.kind == Selection::Bone || sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment)) {
         bones.push_back(sel_.bone);
     } else {
+        showAll = true;
         for (auto& [b, tl] : an->bones) bones.push_back(b);
     }
     std::vector<SheetRow> rows;
@@ -209,35 +205,82 @@ void Editor::drawDopesheet() {
         if (collapsedBones_.count(b)) continue;
         auto it = an->bones.find(b);
         if (it == an->bones.end()) continue;
-        if (!it->second.rotate.empty()) rows.push_back({SheetRow::Property, b, Channel::Rotate});
-        if (!it->second.translate.empty()) rows.push_back({SheetRow::Property, b, Channel::Translate});
-        if (!it->second.scale.empty()) rows.push_back({SheetRow::Property, b, Channel::Scale});
+        const BoneTimeline& tl = it->second;
+        if (!tl.rotate.empty()) rows.push_back({SheetRow::Property, b, Channel::Rotate});
+        if (!tl.translate.empty()) rows.push_back({SheetRow::Property, b, Channel::Translate});
+        if (!tl.scale.empty()) rows.push_back({SheetRow::Property, b, Channel::Scale});
+        if (!tl.shear.empty()) rows.push_back({SheetRow::Property, b, Channel::Shear});
     }
     for (auto& [s, tl] : an->slots) {
-        if (s >= (int)sk_.slots.size() || tl.attachment.empty()) continue;
-        bool shown = std::find(bones.begin(), bones.end(), sk_.slots[s].bone) != bones.end();
-        if (shown || (!sheetLocked_ && sel_.kind == Selection::None)) rows.push_back({SheetRow::Slot, s, Channel::Attachment});
+        if (s >= (int)sk_.slots.size() || tl.empty()) continue;
+        bool shown = showAll || sel_.slot == s || std::find(bones.begin(), bones.end(), sk_.slots[s].bone) != bones.end();
+        if (!shown) continue;
+        rows.push_back({SheetRow::Slot, s});
+        if (!tl.attachment.empty()) rows.push_back({SheetRow::Property, s, Channel::Attachment});
+        if (!tl.color.empty()) rows.push_back({SheetRow::Property, s, Channel::Color});
     }
+    if (!an->drawOrder.empty()) rows.push_back({SheetRow::Property, -1, Channel::DrawOrder});
+    if (!an->events.empty()) rows.push_back({SheetRow::Property, -1, Channel::Event});
 
     auto rowMarks = [&](const SheetRow& r) {
         std::vector<KeyMark> m;
-        if (r.kind == SheetRow::Overview) {
+        switch (r.kind) {
+        case SheetRow::Overview:
             for (auto& [b, tl] : an->bones) addBone(m, tl);
-            for (auto& [s, tl] : an->slots)
-                for (auto& k : tl.attachment) addMarks(m, k.time, kAtt);
-        } else if (r.kind == SheetRow::Bone) {
+            for (auto& [s, tl] : an->slots) addSlot(m, tl);
+            addKeys(m, an->drawOrder, Channel::DrawOrder);
+            addKeys(m, an->events, Channel::Event);
+            break;
+        case SheetRow::Bone: {
             auto it = an->bones.find(r.index);
             if (it != an->bones.end()) addBone(m, it->second);
-        } else if (r.kind == SheetRow::Property) {
-            auto it = an->bones.find(r.index);
-            if (it != an->bones.end()) addBone(m, it->second, channelBit(r.channel));
-        } else {
+            break;
+        }
+        case SheetRow::Slot: {
             auto it = an->slots.find(r.index);
-            if (it != an->slots.end())
-                for (auto& k : it->second.attachment) addMarks(m, k.time, kAtt);
+            if (it != an->slots.end()) addSlot(m, it->second);
+            break;
+        }
+        case SheetRow::Property:
+            if (r.channel == Channel::DrawOrder) {
+                addKeys(m, an->drawOrder, Channel::DrawOrder);
+            } else if (r.channel == Channel::Event) {
+                addKeys(m, an->events, Channel::Event);
+            } else if (isSlotChannel(r.channel)) {
+                auto it = an->slots.find(r.index);
+                if (it != an->slots.end()) addSlot(m, it->second, r.channel);
+            } else {
+                auto it = an->bones.find(r.index);
+                if (it != an->bones.end()) addBone(m, it->second, r.channel);
+            }
+            break;
         }
         std::sort(m.begin(), m.end(), [](const KeyMark& a, const KeyMark& b) { return a.time < b.time; });
         return m;
+    };
+    // Bone / slot / channel triples a row's keys belong to (for delete and curve commands).
+    auto rowChannels = [&](const SheetRow& r) {
+        std::vector<std::pair<int, Channel>> out;
+        switch (r.kind) {
+        case SheetRow::Overview:
+            for (auto& [b, tl] : an->bones)
+                for (Channel ch : kBoneChannels) out.push_back({b, ch});
+            for (auto& [s, tl] : an->slots)
+                for (Channel ch : kSlotChannels) out.push_back({s, ch});
+            out.push_back({-1, Channel::DrawOrder});
+            out.push_back({-1, Channel::Event});
+            break;
+        case SheetRow::Bone:
+            for (Channel ch : kBoneChannels) out.push_back({r.index, ch});
+            break;
+        case SheetRow::Slot:
+            for (Channel ch : kSlotChannels) out.push_back({r.index, ch});
+            break;
+        case SheetRow::Property:
+            out.push_back({r.index, r.channel});
+            break;
+        }
+        return out;
     };
 
     // ---- geometry ----
@@ -331,12 +374,13 @@ void Editor::drawDopesheet() {
                 } else {
                     selectBone(r.index);
                 }
-            } else if (r.kind == SheetRow::Property) {
+            } else if (r.kind == SheetRow::Property && isBoneChannel(r.channel)) {
                 selectBone(r.index);
-                setTool(r.channel == Channel::Rotate ? Tool::Rotate : r.channel == Channel::Translate ? Tool::Translate : Tool::Scale);
-            } else if (r.kind == SheetRow::Slot) {
+                setTool(r.channel == Channel::Rotate ? Tool::Rotate : r.channel == Channel::Translate ? Tool::Translate
+                        : r.channel == Channel::Scale ? Tool::Scale : Tool::Shear);
+            } else if (r.kind == SheetRow::Slot || (r.kind == SheetRow::Property && isSlotChannel(r.channel))) {
                 selectSlot(r.index);
-            } else {
+            } else if (r.kind == SheetRow::Overview) {
                 selectAnimation(anim_);
             }
         } else if (hitTime >= 0) {
@@ -382,6 +426,7 @@ void Editor::drawDopesheet() {
                 const SheetRow& r = sheetDrag_.row;
                 if (r.kind == SheetRow::Overview) moveKeys(*an, sheetDrag_.from, t);
                 else if (r.kind == SheetRow::Bone) moveRowKeys(*an, false, r.index, sheetDrag_.from, t);
+                else if (r.kind == SheetRow::Slot) moveRowKeys(*an, true, r.index, sheetDrag_.from, t);
                 else moveChannelKey(*an, r.index, r.channel, sheetDrag_.from, t);
                 sheetDrag_.from = t;
                 setTime(t);
@@ -392,44 +437,29 @@ void Editor::drawDopesheet() {
     }
 
     if (ImGui::BeginPopup("keymenu")) {
-        const SheetRow& r = sheetMenuRow_;
-        auto forBones = [&](auto&& fn) {
-            if (r.kind == SheetRow::Bone || r.kind == SheetRow::Property) fn(r.index);
-            if (r.kind == SheetRow::Overview) {
-                std::vector<int> all;
-                for (auto& [b, tl] : an->bones) all.push_back(b);
-                for (int b : all) fn(b);
-            }
-        };
-        auto channels = [&]() -> std::vector<Channel> {
-            if (r.kind == SheetRow::Property) return {r.channel};
-            return {Channel::Rotate, Channel::Translate, Channel::Scale};
-        };
+        auto targets = rowChannels(sheetMenuRow_);
         if (ImGui::MenuItem("删除关键帧")) {
             checkpoint();
-            forBones([&](int b) {
-                for (Channel ch : channels()) removeKey(*an, b, ch, sheetMenuTime_);
-            });
-            if (r.kind == SheetRow::Slot) removeKey(*an, r.index, Channel::Attachment, sheetMenuTime_);
-            if (r.kind == SheetRow::Overview) {
-                std::vector<int> slots;
-                for (auto& [s, tl] : an->slots) slots.push_back(s);
-                for (int s : slots) removeKey(*an, s, Channel::Attachment, sheetMenuTime_);
-            }
+            for (auto& [index, ch] : targets)
+                while (removeKey(*an, index, ch, sheetMenuTime_)) {
+                    if (ch != Channel::Event) break;  // several events can share a time
+                }
         }
-        if (r.kind != SheetRow::Slot) {
-            if (ImGui::MenuItem("曲线: 线性")) {
+        bool curves = false;
+        for (auto& [index, ch] : targets) curves |= channelHasCurve(ch);
+        if (curves) {
+            ImGui::Separator();
+            auto setCurve = [&](const CurveShape& c) {
                 checkpoint();
-                forBones([&](int b) {
-                    for (Channel ch : channels()) setKeyCurve(*an, b, ch, sheetMenuTime_, Curve::Linear);
-                });
-            }
-            if (ImGui::MenuItem("曲线: 阶梯")) {
-                checkpoint();
-                forBones([&](int b) {
-                    for (Channel ch : channels()) setKeyCurve(*an, b, ch, sheetMenuTime_, Curve::Stepped);
-                });
-            }
+                for (auto& [index, ch] : targets)
+                    if (channelHasCurve(ch)) setKeyCurve(*an, index, ch, sheetMenuTime_, c);
+            };
+            if (ImGui::MenuItem("曲线: 线性")) setCurve(CurveShape::linear());
+            if (ImGui::MenuItem("曲线: 阶梯")) setCurve(CurveShape::stepped());
+            if (ImGui::MenuItem("曲线: 缓入缓出")) setCurve(CurveShape::bezier(0.42f, 0, 0.58f, 1));
+            if (ImGui::MenuItem("曲线: 缓入")) setCurve(CurveShape::bezier(0.42f, 0, 1, 1));
+            if (ImGui::MenuItem("曲线: 缓出")) setCurve(CurveShape::bezier(0, 0, 0.58f, 1));
+            ImGui::TextDisabled("在 Graph 视图里可以拖动手柄自定义");
         }
         ImGui::EndPopup();
     }
@@ -437,12 +467,14 @@ void Editor::drawDopesheet() {
     // ---- draw rows ----
     ImDrawList* rdl = ImGui::GetWindowDrawList();
     float rowsW = avail.x;
+    float ih = ImGui::GetTextLineHeight();
     for (size_t i = 0; i < rows.size(); ++i) {
         const SheetRow& r = rows[i];
         float y = rowsOrigin.y + rowH * i;
         ImVec2 a(rowsOrigin.x, y), b(rowsOrigin.x + rowsW, y + rowH);
         ImU32 bg = r.kind == SheetRow::Overview ? IM_COL32(64, 104, 104, 255)
                    : r.kind == SheetRow::Bone   ? IM_COL32(78, 120, 118, 255)
+                   : r.kind == SheetRow::Slot   ? IM_COL32(88, 100, 128, 255)
                                                 : IM_COL32(56, 56, 59, 255);
         bool selected = (r.kind == SheetRow::Bone && sel_.kind == Selection::Bone && sel_.bone == r.index) ||
                         (r.kind == SheetRow::Slot && sel_.slot == r.index);
@@ -451,57 +483,74 @@ void Editor::drawDopesheet() {
         rdl->AddLine(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y - 1), IM_COL32(30, 30, 32, 255));
 
         // Name column.
-        float tx = a.x + 6, ty = y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
-        float ih = ImGui::GetTextLineHeight();
-        std::string label;
+        float tx = a.x + 6, ty = y + (rowH - ih) * 0.5f;
         if (r.kind == SheetRow::Overview) {
-            label = an->name;
-            rdl->AddText(ImVec2(tx, ty), textCol, label.c_str());
+            rdl->AddText(ImVec2(tx, ty), textCol, an->name.c_str());
         } else if (r.kind == SheetRow::Bone) {
             bool collapsed = collapsedBones_.count(r.index) > 0;
             rdl->AddText(ImVec2(tx, ty), textCol, collapsed ? "+" : "-");
             drawIcon(rdl, Icon::Bone, ImVec2(tx + ih * 1.4f, ty + ih * 0.5f), ih * 0.8f, iconColor(Icon::Bone));
             rdl->AddText(ImVec2(tx + ih * 2.2f, ty), textCol, sk_.bones[r.index].name.c_str());
+        } else if (r.kind == SheetRow::Slot) {
+            drawIcon(rdl, Icon::Slot, ImVec2(tx + ih * 1.4f, ty + ih * 0.5f), ih * 0.75f, iconColor(Icon::Slot));
+            rdl->AddText(ImVec2(tx + ih * 2.2f, ty), textCol, sk_.slots[r.index].name.c_str());
         } else {
-            float indent = r.kind == SheetRow::Property ? ih * 1.2f : 0;
-            Icon ic = r.kind == SheetRow::Slot ? Icon::Slot : channelIcon(r.channel);
-            drawIcon(rdl, ic, ImVec2(tx + indent + ih * 0.5f, ty + ih * 0.5f), ih * 0.75f, iconColor(ic));
-            label = r.kind == SheetRow::Slot ? sk_.slots[r.index].name + " 附件" : channelName(r.channel);
-            rdl->AddText(ImVec2(tx + indent + ih * 1.3f, ty), textCol, label.c_str());
+            float indent = r.index >= 0 ? ih * 1.2f : 0;
+            Icon ic = channelIcon(r.channel);
+            drawIcon(rdl, ic, ImVec2(tx + indent + ih * 0.5f, ty + ih * 0.5f), ih * 0.75f, channelColor(r.channel));
+            rdl->AddText(ImVec2(tx + indent + ih * 1.3f, ty), textCol, channelName(r.channel));
         }
 
-        // Keys.
+        // Interpolation lines: solid = linear, curved = Bezier, dashed = stepped, none = equal values.
         rdl->PushClipRect(ImVec2(keysX0 - 6, y), ImVec2(b.x, b.y), true);
-        std::vector<KeyMark> marks = rowMarks(r);
-        if (r.kind == SheetRow::Property) {
-            // Interpolation lines between keys: solid = linear, dashed = stepped, none = equal values.
-            auto it = an->bones.find(r.index);
-            ImU32 lc = (maskColor(channelBit(r.channel)) & 0x00FFFFFF) | 0xA0000000;
+        if (r.kind == SheetRow::Property && channelHasCurve(r.channel)) {
+            ImU32 lc = (channelColor(r.channel) & 0x00FFFFFF) | 0xA0000000;
+            float mid = y + rowH * 0.5f;
             auto draw = [&](auto& keys) {
                 for (size_t k = 0; k + 1 < keys.size(); ++k) {
-                    bool same;
-                    if constexpr (std::is_same_v<std::decay_t<decltype(keys[k].value)>, float>)
-                        same = std::fabs(keys[k].value - keys[k + 1].value) < 1e-4f;
-                    else
-                        same = length(keys[k].value - keys[k + 1].value) < 1e-4f;
-                    if (same) continue;
-                    ImVec2 p0(timeToX(keys[k].time), y + rowH * 0.5f), p1(timeToX(keys[k + 1].time), y + rowH * 0.5f);
-                    if (keys[k].curve == Curve::Stepped) dashedLine(rdl, p0, p1, lc);
-                    else rdl->AddLine(p0, p1, lc, 1.5f);
+                    if (sameValue(keys[k].value, keys[k + 1].value)) continue;
+                    float x0 = timeToX(keys[k].time), x1 = timeToX(keys[k + 1].time);
+                    const CurveShape& c = keys[k].curve;
+                    if (c.type == Curve::Stepped) {
+                        dashedLine(rdl, ImVec2(x0, mid), ImVec2(x1, mid), lc);
+                    } else if (c.type == Curve::Bezier) {
+                        ImVec2 pts[17];
+                        for (int j = 0; j <= 16; ++j) {
+                            float f = j / 16.0f;
+                            pts[j] = ImVec2(x0 + (x1 - x0) * f, mid - (applyCurve(c, f) - f) * rowH * 0.6f);
+                        }
+                        rdl->AddPolyline(pts, 17, lc, 0, 1.5f);
+                    } else {
+                        rdl->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), lc, 1.5f);
+                    }
                 }
             };
-            if (it != an->bones.end()) {
-                if (r.channel == Channel::Rotate) draw(it->second.rotate);
-                if (r.channel == Channel::Translate) draw(it->second.translate);
-                if (r.channel == Channel::Scale) draw(it->second.scale);
+            if (r.channel == Channel::Color) {
+                auto it = an->slots.find(r.index);
+                if (it != an->slots.end()) draw(it->second.color);
+            } else {
+                auto it = an->bones.find(r.index);
+                if (it != an->bones.end()) {
+                    if (r.channel == Channel::Rotate) draw(it->second.rotate);
+                    if (r.channel == Channel::Translate) draw(it->second.translate);
+                    if (r.channel == Channel::Scale) draw(it->second.scale);
+                    if (r.channel == Channel::Shear) draw(it->second.shear);
+                }
             }
         }
-        for (const KeyMark& m : marks) {
+        // Keys.
+        for (const KeyMark& m : rowMarks(r)) {
             float x = timeToX(m.time);
             bool atTime = std::fabs(m.time - time_) < kKeyEpsilon;
             ImVec2 k0(x - 2.5f, y + rowH * 0.2f), k1(x + 2.5f, y + rowH * 0.8f);
             rdl->AddRectFilled(k0, k1, maskColor(m.mask));
             rdl->AddRect(k0 - ImVec2(0.5f, 0.5f), k1 + ImVec2(0.5f, 0.5f), atTime ? IM_COL32(255, 255, 255, 255) : IM_COL32(20, 20, 20, 220));
+        }
+        // Event names next to their keys.
+        if (r.kind == SheetRow::Property && r.channel == Channel::Event) {
+            for (auto& k : an->events)
+                if (k.event >= 0 && k.event < (int)sk_.events.size())
+                    rdl->AddText(ImVec2(timeToX(k.time) + 5, ty), dimCol, sk_.events[k.event].name.c_str());
         }
         rdl->PopClipRect();
     }

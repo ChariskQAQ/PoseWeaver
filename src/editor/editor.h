@@ -10,15 +10,15 @@
 #include <vector>
 
 enum class Mode { Setup, Animate };
-enum class Tool { Rotate, Translate, Scale, Pose, CreateBone, MeshEdit, Weights };
+enum class Tool { Rotate, Translate, Scale, Shear, Pose, CreateBone, MeshEdit, Weights };
 enum class Axes { Local, Parent, World };
 
 struct Selection {
-    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image } kind = None;
+    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image, Event } kind = None;
     int bone = -1;        // also set for slots/attachments (their bone), used by transform tools
     int slot = -1;
     int attachment = -1;  // attachment index inside `slot`
-    int index = -1;       // animation or image index
+    int index = -1;       // animation, image or event index
     std::vector<int> vertices;  // selected mesh vertices (MeshEdit tool)
     void clear() { *this = Selection{}; }
 };
@@ -41,7 +41,8 @@ struct Drag {
 // Animate-mode changes that have not been keyed yet (auto key off).
 struct PendingChange {
     rig::Transform local;
-    bool rot = false, trans = false, scale = false;
+    bool rot = false, trans = false, scale = false, shear = false;
+    bool any() const { return rot || trans || scale || shear; }
 };
 
 enum class KeyState { None, Changed, Keyed };
@@ -60,6 +61,12 @@ public:
     // Builds a two-bone skinned arm with a "wave" animation from `imagePath`.
     // weightsView = stay in Setup mode with the weights tool showing the lower bone.
     void buildDemo(const std::string& imagePath, float time, bool weightsView);
+    // Brings the Graph tab to front with the first rotate key of the selected bone selected.
+    void focusGraph() {
+        focusGraph_ = 3;
+        graphCurve_ = 0;
+        graphKey_ = 0;
+    }
 
 private:
     // --- document ---
@@ -118,7 +125,7 @@ private:
     // --- dopesheet ---
     struct SheetRow {
         enum Kind { Overview, Bone, Slot, Property } kind;
-        int index;                                  // bone or slot
+        int index;                                  // bone or slot (-1 for draw order / events)
         rig::Channel channel = rig::Channel::Rotate;  // Property rows
     };
     struct SheetDrag {
@@ -137,6 +144,14 @@ private:
     std::vector<int> sheetLockedBones_;
     std::set<int> collapsedBones_;
 
+    // --- graph ---
+    unsigned graphHidden_ = 0;             // bit per curve id hidden by the user
+    int graphCurve_ = -1, graphKey_ = -1;  // selected key (curve id, key index)
+    struct GraphDrag {
+        enum Kind { None, Key, Handle1, Handle2, Scrub } kind = None;
+        bool checkpointed = false;
+    } graphDrag_;
+
     // --- mesh / weights tools ---
     int gridCols_ = 6, gridRows_ = 6;
     float brushRadius_ = 40, brushStrength_ = 0.5f;
@@ -151,7 +166,10 @@ private:
     bool closeConfirmed_ = false;
     bool showDemo_ = false;
     bool resetLayout_ = false;
-    int focusWeights_ = 0;  // frames left to bring the Weights tab to front (docking settles over a few frames)
+    struct FiredEvent { std::string text; float timeLeft; };
+    std::vector<FiredEvent> firedEvents_;
+    int focusWeights_ = 0;
+    int focusGraph_ = 0;  // frames left to bring the Weights tab to front (docking settles over a few frames)
 
     // frame parts
     void handleShortcuts();
@@ -161,6 +179,7 @@ private:
     void drawProperties();
     void drawWeightsView();
     void drawDopesheet();
+    void drawGraph();
     void drawStatusBar();
     void drawCloseDialog();
     void setupDockLayout(unsigned int dockspace);
@@ -192,6 +211,7 @@ private:
     void propertiesAttachment(int s, int a);
     void propertiesAnimation(int a);
     void propertiesImage(int i);
+    void propertiesEvent(int e);
     bool propertiesHeader(int icon, const std::string& type, const std::string& name, bool canRename, bool canDelete);
 
     // selection
@@ -199,6 +219,7 @@ private:
     void selectSlot(int s);
     void selectAttachment(int s, int a);
     void selectAnimation(int a);
+    void selectEvent(int e);
     void validateSelection();
 
     // document operations
@@ -225,8 +246,14 @@ private:
     void setTime(float t);
     // Applies a new local transform for a bone: edits setup in Setup mode; in Animate mode
     // keys it (auto key) or records it as a pending change.
-    void setBoneLocal(int bone, const rig::Transform& local, bool rot, bool trans, bool scale);
-    void keyBone(int bone, bool rot, bool trans, bool scale);
+    void setBoneLocal(int bone, const rig::Transform& local, bool rot, bool trans, bool scale, bool shear = false);
+    void keyBone(int bone, bool rot, bool trans, bool scale, bool shear = false);
+    void setSlotColor(int slot, const rig::Color& color);  // setup colour, or a colour key in Animate mode
+    KeyState slotColorKeyState(int slot);
+    // Moves a slot one step in the draw order: setup order in Setup mode, a draw order key in Animate mode.
+    void moveDrawOrder(int slot, int delta);
+    void keyEvent(int event);  // event key at the current time
+    void triggerEvents(float from, float to);  // playback: show fired events in the viewport
     void keyPending();  // key every pending change ("Key edited")
     KeyState boneKeyState(int bone, rig::Channel ch);
     KeyState slotKeyState(int slot);

@@ -94,7 +94,7 @@ struct ToolValues {
 }
 
 void Editor::drawMainToolbar() {
-    const float h = groupHeight(4);
+    const float h = groupHeight(5);
     const float fh = ImGui::GetFrameHeight();
     const bool animate = mode_ == Mode::Animate;
     float x = canvasOrigin_.x + 8 + fh * 1.15f + 10 + 10;
@@ -131,12 +131,12 @@ void Editor::drawMainToolbar() {
         tv.parentWorld = p >= 0 ? pose_.world[p] : Affine{};
         tv.world = pose_.world[sel_.bone];
     }
-    auto apply = [&](const Transform& t, bool rot, bool trans, bool scale) {
+    auto apply = [&](const Transform& t, bool rot, bool trans, bool scale, bool shear = false) {
         if (tv.isAttachment) {
             if (Attachment* att = transformTargetAttachment()) att->transform = t;
             updatePose();
         } else {
-            setBoneLocal(tv.bone, t, rot, trans, scale);
+            setBoneLocal(tv.bone, t, rot, trans, scale, shear);
         }
     };
     auto keyColor = [&](Channel ch) {
@@ -168,7 +168,8 @@ void Editor::drawMainToolbar() {
             KeyState st = boneKeyState(tv.bone, ch);
             std::string tip = std::string(st == KeyState::Keyed ? "当前帧已有" : st == KeyState::Changed ? "有未打帧的" : "为") +
                               name + (st == KeyState::None ? "打关键帧" : st == KeyState::Changed ? "改动，点击打帧" : "关键帧");
-            if (keyButton(id, keyColor(ch), tip.c_str())) keyBone(tv.bone, ch == Channel::Rotate, ch == Channel::Translate, ch == Channel::Scale);
+            if (keyButton(id, keyColor(ch), tip.c_str()))
+                keyBone(tv.bone, ch == Channel::Rotate, ch == Channel::Translate, ch == Channel::Scale, ch == Channel::Shear);
         };
 
         // Rotate
@@ -237,6 +238,22 @@ void Editor::drawMainToolbar() {
         }
         keyCell("kscale", Channel::Scale, "缩放");
 
+        // Shear
+        row("shear", Icon::Shear, "斜切 Z", Tool::Shear);
+        {
+            float xy[2] = {tv.local.shearX, tv.local.shearY};
+            ImGui::SetNextItemWidth(fieldW * 2 + 3);
+            bool changed = ImGui::DragFloat2("##shearv", xy, 0.5f, 0, 0, "%.1f°");
+            if (ImGui::IsItemActivated()) checkpoint();
+            if (changed && tv.valid) {
+                Transform t = tv.local;
+                t.shearX = xy[0];
+                t.shearY = xy[1];
+                apply(t, false, false, false, true);
+            }
+        }
+        keyCell("kshear", Channel::Shear, "斜切");
+
         // Length (Setup mode bones) or bone name, so the 4th row is never empty.
         ImGui::EndDisabled();
         ImGui::Dummy(ImVec2(btnW, fh));
@@ -279,7 +296,7 @@ void Editor::drawMainToolbar() {
         if (iconButton("keyedit", Icon::Key, "打帧改动 K", false, w, animate && any)) keyPending();
         ImGui::BeginDisabled(!animate);
         if (iconButton("keyall", Icon::Key, "全部打帧", false, w, animate && sel_.bone >= 0) && sel_.bone >= 0)
-            keyBone(sel_.bone, true, true, true);
+            keyBone(sel_.bone, true, true, true, true);
         ImGui::EndDisabled();
     }
     endGroup();

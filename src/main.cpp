@@ -43,6 +43,7 @@ struct Options {
     std::string demoImage;   // --demo <png>
     float demoTime = 0.5f;   // --time <seconds>
     bool demoWeights = false;  // --weights
+    bool demoGraph = false;    // --graph
     std::string screenshot;  // --screenshot <png>: save after a few frames and exit
 };
 
@@ -54,6 +55,7 @@ static Options parseArgs(int argc, char** argv) {
         if (a == "--demo") o.demoImage = next();
         else if (a == "--time") o.demoTime = std::strtof(next().c_str(), nullptr);
         else if (a == "--weights") o.demoWeights = true;
+        else if (a == "--graph") o.demoGraph = true;
         else if (a == "--screenshot") o.screenshot = next();
         else o.open = a;
     }
@@ -100,6 +102,7 @@ int main(int argc, char** argv) {
         g_editor = &editor;
         glfwSetDropCallback(window, onDrop);
         if (!opt.demoImage.empty()) editor.buildDemo(opt.demoImage, opt.demoTime, opt.demoWeights);
+        if (opt.demoGraph) editor.focusGraph();
         else if (!opt.open.empty()) editor.onFilesDropped({opt.open});
         int frameCount = 0;
 

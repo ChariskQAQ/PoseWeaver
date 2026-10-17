@@ -49,7 +49,7 @@ static void testAnimationSampling() {
     CHECK(near(p.local[1].rotation, 45.0f));
     p = makeAnimatedPose(sk, &an, 1.0f);
     CHECK(near(p.world[2].origin(), {100, 0}));
-    setKeyCurve(an, 1, Channel::Rotate, 0.0f, Curve::Stepped);
+    setKeyCurve(an, 1, Channel::Rotate, 0.0f, CurveShape::stepped());
     p = makeAnimatedPose(sk, &an, 0.9f);
     CHECK(near(p.local[1].rotation, 90.0f));
     // Replacing an existing key keeps one key.
@@ -158,6 +158,127 @@ static void testRemoveBone() {
     for (size_t i = 0; i < before.size(); ++i) CHECK(near(before[i], after[i]));
 }
 
+
+static void testShearMatrix() {
+    Transform t;
+    t.x = 5;
+    t.y = -3;
+    t.rotation = 30;
+    t.scaleX = 2;
+    t.scaleY = -1.5f;
+    t.shearY = 20;
+    Transform d = decompose(t.matrix());
+    CHECK(near(d.x, 5) && near(d.y, -3));
+    CHECK(near(d.rotation, 30) && near(d.scaleX, 2) && near(d.scaleY, -1.5f) && near(d.shearY, 20));
+    // shearX folds into rotation + shearY, the matrix must survive the round trip.
+    t.shearX = 10;
+    Affine a = t.matrix(), b = decompose(a).matrix();
+    CHECK(near(a.a, b.a) && near(a.b, b.b) && near(a.c, b.c) && near(a.d, b.d));
+    // Identity shear leaves the old TRS matrix unchanged.
+    Transform plain;
+    plain.rotation = 45;
+    plain.scaleX = 3;
+    Affine p = plain.matrix(), q = Affine::fromTRS(0, 0, 45, 3, 1);
+    CHECK(near(p.a, q.a) && near(p.b, q.b) && near(p.c, q.c) && near(p.d, q.d));
+}
+
+static void testCurves() {
+    CHECK(near(applyCurve(CurveShape::linear(), 0.3f), 0.3f));
+    CHECK(near(applyCurve(CurveShape::stepped(), 0.99f), 0.0f));
+    CHECK(near(applyCurve(CurveShape::bezier(1 / 3.0f, 1 / 3.0f, 2 / 3.0f, 2 / 3.0f), 0.7f), 0.7f));
+    CurveShape ease = CurveShape::bezier(0.42f, 0, 0.58f, 1);
+    CHECK(near(applyCurve(ease, 0.5f), 0.5f));
+    CHECK(applyCurve(ease, 0.2f) < 0.15f);
+    CHECK(applyCurve(ease, 0.8f) > 0.85f);
+    CHECK(near(applyCurve(ease, 0), 0) && near(applyCurve(ease, 1), 1));
+
+    Skeleton sk = makeArm();
+    Animation an;
+    setRotateKey(an, 1, 0, 0);
+    setRotateKey(an, 1, 1, 100);
+    setKeyCurve(an, 1, Channel::Rotate, 0, ease);
+    Pose pose = makeAnimatedPose(sk, &an, 0.2f);
+    CHECK(pose.local[1].rotation - 90 < 15);
+    CHECK(keyCurve(an, 1, Channel::Rotate, 0)->type == Curve::Bezier);
+}
+
+static Skeleton makeThreeSlots() {
+    Skeleton sk = makeArm();
+    for (const char* n : {"a", "b", "c"}) {
+        Slot s;
+        s.name = n;
+        sk.slots.push_back(s);
+    }
+    return sk;
+}
+
+static void testSlotColorAndDrawOrder() {
+    Skeleton sk = makeThreeSlots();
+    Animation an;
+    setColorKey(an, 1, 0, Color(1, 0, 0, 1));
+    setColorKey(an, 1, 1, Color(0, 0, 1, 0));
+    setDrawOrderKey(an, 0.5f, {2, 0, 1});
+    sk.animations.push_back(an);
+
+    Pose p = makeAnimatedPose(sk, &sk.animations[0], 0.5f);
+    CHECK(near(p.slotColor[1][0], 0.5f) && near(p.slotColor[1][2], 0.5f) && near(p.slotColor[1][3], 0.5f));
+    CHECK(p.slotColor[0] == Color());
+    CHECK((p.drawOrder == std::vector<int>{2, 0, 1}));
+    p = makeAnimatedPose(sk, &sk.animations[0], 0.25f);
+    CHECK((p.drawOrder == std::vector<int>{0, 1, 2}));
+
+    // Swapping slots keeps timelines and draw order keys pointing at the same slots.
+    sk.swapSlots(0, 2);
+    CHECK(sk.slots[0].name == "c" && sk.slots[2].name == "a");
+    CHECK((sk.animations[0].drawOrder[0].order == std::vector<int>{0, 2, 1}));
+    CHECK(sk.animations[0].slots.count(1) == 1);
+
+    sk.removeSlot(1);  // "b"
+    CHECK(sk.slots.size() == 2 && sk.slots[1].name == "a");
+    CHECK(sk.animations[0].slots.empty());
+    CHECK((sk.animations[0].drawOrder[0].order == std::vector<int>{0, 1}));
+}
+
+static void testEvents() {
+    Skeleton sk = makeArm();
+    EventDef step;
+    step.name = "step";
+    step.intValue = 3;
+    EventDef hit;
+    hit.name = "hit";
+    sk.events = {step, hit};
+    Animation an;
+    setEventKey(an, 0.5f, 0, sk.events[0]);
+    setEventKey(an, 0.5f, 1, sk.events[1]);
+    setEventKey(an, 0.5f, 0, sk.events[0]);  // duplicate ignored
+    setEventKey(an, 0.0f, 1, sk.events[1]);
+    CHECK(an.events.size() == 3 && an.events[1].intValue == 3);
+    CHECK(eventsInRange(an, -1, 0.1f).size() == 1);
+    CHECK(eventsInRange(an, 0.0f, 0.5f).size() == 2);
+    moveChannelKey(an, 0, Channel::Event, 0.5f, 0.75f);
+    CHECK(eventsInRange(an, 0.6f, 1.0f).size() == 1);
+    sk.animations.push_back(an);
+    sk.removeEvent(0);
+    CHECK(sk.animations[0].events.size() == 2);
+    for (auto& k : sk.animations[0].events) CHECK(k.event == 0);
+}
+
+static void testVersion1Compat() {
+    const char* v1 = R"({"format":"rig","version":1,"images":[],
+        "bones":[{"name":"root","parent":-1,"length":0,"x":0,"y":0,"rotation":0,"scaleX":1,"scaleY":1}],
+        "slots":[{"name":"s","bone":0,"active":-1,"color":[1,0.5,1,1],"attachments":[]}],
+        "animations":[{"name":"a","duration":1,
+          "bones":[{"bone":0,"rotate":[{"time":0,"value":0,"curve":"stepped"},{"time":1,"value":90,"curve":"linear"}],
+                    "translate":[],"scale":[]}],
+          "slots":[{"slot":0,"attachment":[{"time":0,"value":-1}]}]}]})";
+    Skeleton sk;
+    std::string err;
+    CHECK(fromJson(v1, sk, &err));
+    CHECK(sk.animations.size() == 1 && sk.animations[0].bones[0].rotate[0].curve.type == Curve::Stepped);
+    CHECK(near(sk.slots[0].color[1], 0.5f));
+    CHECK(!fromJson(R"({"format":"rig","version":99,"images":[],"bones":[],"slots":[],"animations":[]})", sk, &err));
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -168,6 +289,17 @@ static void testJsonRoundTrip() {
     setRotateKey(an, 1, 0.5f, 12);
     setTranslateKey(an, 2, 0.25f, {3, 4});
     setAttachmentKey(an, 0, 0.75f, -1);
+    setShearKey(an, 1, 0.5f, {5, -5});
+    setKeyCurve(an, 1, Channel::Rotate, 0.5f, CurveShape::bezier(0.1f, 0.2f, 0.7f, 1.1f));
+    setColorKey(an, 0, 0.25f, Color(1, 0.5f, 0.25f, 1));
+    setDrawOrderKey(an, 0.5f, {0});
+    sk.bones[1].setup.shearY = 12;
+    EventDef ev;
+    ev.name = "footstep";
+    ev.stringValue = "left";
+    ev.audioPath = "step.wav";
+    sk.events.push_back(ev);
+    setEventKey(an, 0.4f, 0, ev);
     sk.animations.push_back(an);
 
     std::string text = toJson(sk);
@@ -188,6 +320,11 @@ int main() {
     testMeshSkinning();
     testAlphaTrim();
     testRemoveBone();
+    testShearMatrix();
+    testCurves();
+    testSlotColorAndDrawOrder();
+    testEvents();
+    testVersion1Compat();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

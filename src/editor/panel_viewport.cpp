@@ -64,7 +64,8 @@ int Editor::pickBone(ImVec2 screen) const {
 
 int Editor::pickSlot(Vec2 world) const {
     if (!view_.imagesVisible || !view_.imagesSelectable) return -1;
-    for (int s = (int)sk_.slots.size() - 1; s >= 0; --s) {
+    for (int i = (int)pose_.drawOrder.size() - 1; i >= 0; --i) {
+        int s = pose_.drawOrder[i];
         if (hiddenSlots_.count(s)) continue;
         const Slot& slot = sk_.slots[s];
         int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
@@ -104,7 +105,7 @@ int Editor::pickVertex(ImVec2 screen) const {
 
 bool Editor::overBoneTip(ImVec2 screen) const {
     if (mode_ != Mode::Setup || sel_.kind != Selection::Bone || sel_.bone < 0) return false;
-    if (tool_ != Tool::Rotate && tool_ != Tool::Translate && tool_ != Tool::Scale) return false;
+    if (tool_ != Tool::Rotate && tool_ != Tool::Translate && tool_ != Tool::Scale && tool_ != Tool::Shear) return false;
     const Bone& b = sk_.bones[sel_.bone];
     if (b.length * zoom_ < 12) return false;
     return dist(screen, toScreen(boneTip(b, pose_.world[sel_.bone]))) < 6.0f * uiScale_;
@@ -142,7 +143,8 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
     switch (tool_) {
     case Tool::Rotate:
     case Tool::Translate:
-    case Tool::Scale: {
+    case Tool::Scale:
+    case Tool::Shear: {
         if (overBoneTip(mouse)) {
             drag_.kind = Drag::BoneLength;
             return;
@@ -267,6 +269,11 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
             float f = scaleFactor();
             t.scaleX *= f;
             if (!ctrl) t.scaleY *= f;
+        } else if (drag_.tool == Tool::Shear) {
+            // Dragging around the pivot tilts the Y axis (Ctrl: the X axis).
+            float d = rotatedDelta();
+            if (ctrl) t.shearX += d;
+            else t.shearY += d;
         }
     };
 
@@ -275,7 +282,8 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         ensureCheckpoint();
         Transform t = drag_.startTransform;
         applyTool(t);
-        setBoneLocal(sel_.bone, t, drag_.tool == Tool::Rotate, drag_.tool == Tool::Translate, drag_.tool == Tool::Scale);
+        setBoneLocal(sel_.bone, t, drag_.tool == Tool::Rotate, drag_.tool == Tool::Translate, drag_.tool == Tool::Scale,
+                     drag_.tool == Tool::Shear);
         break;
     }
     case Drag::PoseRotate: {
@@ -384,16 +392,17 @@ void Editor::viewportMouseUp(ImVec2 mouse, bool shift) {
 void Editor::drawSlots(ImDrawList* dl) {
     if (!view_.imagesVisible) return;
     Geometry g;
-    for (size_t s = 0; s < sk_.slots.size(); ++s) {
-        if (hiddenSlots_.count((int)s)) continue;
+    for (int s : pose_.drawOrder) {
+        if (hiddenSlots_.count(s)) continue;
         const Slot& slot = sk_.slots[s];
-        int a = s < pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
+        int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
         if (a < 0 || a >= (int)slot.attachments.size()) continue;
         const Attachment& att = slot.attachments[a];
         computeGeometry(sk_, pose_, slot, att, g);
         bool hasTex = att.image >= 0 && att.image < (int)textures_.size() && textures_[att.image].id;
         if (hasTex && !g.triangles.empty()) {
-            ImU32 col = ImGui::ColorConvertFloat4ToU32({slot.color[0], slot.color[1], slot.color[2], slot.color[3]});
+            const Color& c = s < (int)pose_.slotColor.size() ? pose_.slotColor[s] : slot.color;
+            ImU32 col = ImGui::ColorConvertFloat4ToU32({c[0], c[1], c[2], c[3]});
             dl->PushTextureID((ImTextureID)(intptr_t)textures_[att.image].id);
             dl->PrimReserve((int)g.triangles.size(), (int)g.positions.size());
             unsigned int base = dl->_VtxCurrentIdx;
@@ -402,7 +411,7 @@ void Editor::drawSlots(ImDrawList* dl) {
             for (int idx : g.triangles) dl->PrimWriteIdx((ImDrawIdx)(base + idx));
             dl->PopTextureID();
         }
-        bool selected = (int)s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
+        bool selected = s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
         if ((!hasTex || selected) && att.type == AttachmentType::Region) {
             ImVec2 p[4];
             for (int i = 0; i < 4; ++i) p[i] = toScreen(g.positions[i]);
@@ -573,6 +582,16 @@ void Editor::drawViewport() {
     if (tool_ == Tool::Weights && hovered)
         dl->AddCircle(mouse, brushRadius_ * uiScale_, io.KeyCtrl ? IM_COL32(120, 160, 255, 220) : IM_COL32(255, 120, 120, 220), 48, 1.5f);
     if (anim) dl->AddRect(lo, hi, IM_COL32(90, 200, 160, 120), 0, 0, 2.0f);
+    // Events fired during playback flash at the top of the viewport.
+    float ey = lo.y + 12;
+    for (auto& e : firedEvents_) {
+        ImVec2 ts = ImGui::CalcTextSize(e.text.c_str());
+        ImVec2 p(lo.x + (canvasSize_.x - ts.x) * 0.5f, ey);
+        int alpha = (int)(255 * std::min(1.0f, e.timeLeft / 0.4f));
+        dl->AddRectFilled(p - ImVec2(8, 3), p + ts + ImVec2(8, 3), IM_COL32(150, 90, 210, alpha * 3 / 4), 4);
+        dl->AddText(p, IM_COL32(255, 255, 255, alpha), e.text.c_str());
+        ey += ts.y + 10;
+    }
     dl->PopClipRect();
 
     drawModeLabel();

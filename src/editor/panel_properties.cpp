@@ -72,6 +72,7 @@ void Editor::drawProperties() {
     case Selection::Attachment: propertiesAttachment(sel_.slot, sel_.attachment); break;
     case Selection::Animation: propertiesAnimation(sel_.index); break;
     case Selection::Image: propertiesImage(sel_.index); break;
+    case Selection::Event: propertiesEvent(sel_.index); break;
     default:
         ImGui::TextDisabled("未选择");
         ImGui::Spacing();
@@ -90,6 +91,7 @@ void Editor::drawProperties() {
         case Selection::Slot: renameBuf_ = sk_.slots[sel_.slot].name; break;
         case Selection::Attachment: renameBuf_ = sk_.slots[sel_.slot].attachments[sel_.attachment].name; break;
         case Selection::Animation: renameBuf_ = sk_.animations[sel_.index].name; break;
+        case Selection::Event: renameBuf_ = sk_.events[sel_.index].name; break;
         default: renameBuf_.clear(); break;
         }
         if (!renameBuf_.empty()) ImGui::OpenPopup("重命名");
@@ -125,6 +127,15 @@ void Editor::propertiesSkeleton() {
         ImGui::EndTable();
     }
     if (ImGui::Button("新建动画")) selectAnimation(createAnimation());
+    ImGui::SameLine();
+    if (ImGui::Button("新建事件")) {
+        checkpoint();
+        EventDef e;
+        e.name = sk_.uniqueEventName("event");
+        sk_.events.push_back(e);
+        selectEvent((int)sk_.events.size() - 1);
+        return;
+    }
     ImGui::SameLine();
     if (ImGui::Button("导入图片...")) importImageDialog();
 }
@@ -199,22 +210,34 @@ void Editor::propertiesSlot(int s) {
             return;
         }
         propLabel("颜色");
-        ImGui::BeginDisabled(!setup);
-        float col[4] = {slot.color[0], slot.color[1], slot.color[2], slot.color[3]};
-        if (ImGui::ColorEdit4("##col", col, ImGuiColorEditFlags_AlphaBar)) std::copy(col, col + 4, slot.color);
-        if (ImGui::IsItemActivated()) checkpoint();
-        ImGui::EndDisabled();
+        {
+            // Setup: edits the setup colour. Animate: shows the animated colour and keys edits.
+            Color c = s < (int)pose_.slotColor.size() ? pose_.slotColor[s] : slot.color;
+            float col[4] = {c[0], c[1], c[2], c[3]};
+            if (!setup) {
+                KeyState st = slotColorKeyState(s);
+                if (keyButton("kcol", st == KeyState::Keyed ? theme::kKeyKeyed : theme::kKeyNone,
+                              st == KeyState::Keyed ? "当前帧已有颜色关键帧" : "为当前颜色打关键帧")) {
+                    checkpoint();
+                    setSlotColor(s, c);
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+            }
+            bool changed = ImGui::ColorEdit4("##col", col, ImGuiColorEditFlags_AlphaBar);
+            if (ImGui::IsItemActivated()) checkpoint();
+            if (changed) setSlotColor(s, Color(col[0], col[1], col[2], col[3]));
+        }
         propLabel("附件");
         ImGui::TextUnformatted(current >= 0 && current < (int)slot.attachments.size() ? slot.attachments[current].name.c_str() : "(无)");
         propLabel("绘制顺序");
-        ImGui::Text("%d / %d", (int)sk_.slots.size() - s, (int)sk_.slots.size());
+        int pos = (int)(std::find(pose_.drawOrder.begin(), pose_.drawOrder.end(), s) - pose_.drawOrder.begin());
+        ImGui::Text("%d / %d", (int)sk_.slots.size() - pos, (int)sk_.slots.size());
         ImGui::SameLine();
-        ImGui::BeginDisabled(!setup);
-        if (ImGui::ArrowButton("front", ImGuiDir_Up)) moveSlot(s, +1);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("往前（盖住更多）");
+        if (ImGui::ArrowButton("front", ImGuiDir_Up)) moveDrawOrder(s, +1);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(setup ? "往前（盖住更多）" : "往前，并打绘制顺序关键帧");
         ImGui::SameLine(0, 2);
-        if (ImGui::ArrowButton("back", ImGuiDir_Down)) moveSlot(s, -1);
-        ImGui::EndDisabled();
+        if (ImGui::ArrowButton("back", ImGuiDir_Down)) moveDrawOrder(s, -1);
         ImGui::EndTable();
     }
     ImGui::TextDisabled("在树里点附件左侧的圆点切换显示的附件。");
@@ -323,6 +346,52 @@ void Editor::propertiesAnimation(int i) {
         ImGui::EndTable();
     }
     if (anim_ != i && ImGui::Button("设为当前动画")) selectAnimation(i);
+}
+
+void Editor::propertiesEvent(int e) {
+    EventDef& ev = sk_.events[e];
+    if (propertiesHeader((int)Icon::Event, "事件", ev.name, true, true)) {
+        deleteSelection();
+        return;
+    }
+    if (beginProps("event")) {
+        propLabel("整数");
+        int iv = ev.intValue;
+        bool ci = ImGui::DragInt("##int", &iv);
+        if (ImGui::IsItemActivated()) checkpoint();
+        if (ci) ev.intValue = iv;
+        propLabel("浮点");
+        float fv = ev.floatValue;
+        bool cf = ImGui::DragFloat("##float", &fv, 0.05f);
+        if (ImGui::IsItemActivated()) checkpoint();
+        if (cf) ev.floatValue = fv;
+        propLabel("字符串");
+        std::string sv = ev.stringValue;
+        if (ImGui::InputText("##string", &sv, ImGuiInputTextFlags_EnterReturnsTrue)) {
+            checkpoint();
+            ev.stringValue = sv;
+        }
+        propLabel("音频");
+        std::string audio = ev.audioPath.empty() ? "(无)" : fs::u8path(ev.audioPath).filename().u8string();
+        if (ImGui::SmallButton((audio + "##audio").c_str())) {
+            std::string path = openFileDialog("音频 (wav/ogg/mp3)", "*.wav;*.ogg;*.mp3");
+            if (!path.empty()) {
+                checkpoint();
+                ev.audioPath = path;
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("选择音频文件（播放功能在阶段 6 实现）");
+        ImGui::EndTable();
+    }
+    int uses = 0;
+    for (auto& an : sk_.animations)
+        for (auto& k : an.events) uses += k.event == e;
+    ImGui::TextDisabled("被 %d 个关键帧使用。整数/浮点/字符串是默认值，插入关键帧时复制。", uses);
+    if (mode_ == Mode::Animate) {
+        if (ImGui::Button("在当前帧插入该事件")) keyEvent(e);
+    } else {
+        ImGui::TextDisabled("切到 Animate 模式后可在时间轴上插入。");
+    }
 }
 
 void Editor::propertiesImage(int i) {

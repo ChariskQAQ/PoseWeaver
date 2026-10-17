@@ -30,17 +30,31 @@ void Editor::frame(float dt) {
         if (!a || mode_ != Mode::Animate) {
             playing_ = false;
         } else {
+            float prev = time_;
             time_ += dt * speed_ * playDir_;
+            bool wrapped = false;
             if (time_ > a->duration || time_ < 0) {
                 if (loop_ && a->duration > 0) {
                     time_ = std::fmod(time_ + a->duration, a->duration);
+                    wrapped = true;
                 } else {
                     time_ = std::clamp(time_, 0.0f, a->duration);
                     playing_ = false;
                 }
             }
+            if (playDir_ > 0) {
+                if (wrapped) {
+                    triggerEvents(prev, a->duration);
+                    triggerEvents(-1, time_);
+                } else {
+                    triggerEvents(prev, time_);
+                }
+            }
         }
     }
+    for (auto& e : firedEvents_) e.timeLeft -= dt;
+    firedEvents_.erase(std::remove_if(firedEvents_.begin(), firedEvents_.end(), [](const FiredEvent& e) { return e.timeLeft <= 0; }),
+                       firedEvents_.end());
     // Unkeyed changes only live on the frame they were made on.
     if (!pending_.empty() &&
         (mode_ != Mode::Animate || anim_ != pendingAnim_ || std::fabs(time_ - pendingTime_) > kKeyEpsilon))
@@ -61,7 +75,10 @@ void Editor::frame(float dt) {
     drawTree();
     drawProperties();
     if (tool_ == Tool::Weights) drawWeightsView();
-    if (mode_ == Mode::Animate) drawDopesheet();
+    if (mode_ == Mode::Animate) {
+        drawDopesheet();
+        drawGraph();
+    }
     drawViewport();
     drawCloseDialog();
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
@@ -80,6 +97,7 @@ void Editor::setupDockLayout(unsigned int dockspace) {
     ImGui::DockBuilderDockWindow("###Properties", rightBottom);
     ImGui::DockBuilderDockWindow("###Weights", rightBottom);
     ImGui::DockBuilderDockWindow("###Dopesheet", bottom);
+    ImGui::DockBuilderDockWindow("###Graph", bottom);
     // The viewport is the workspace, not a tab: hide its tab bar like Spine does.
     if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(center)) n->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar;
     ImGui::DockBuilderFinish(dockspace);
@@ -169,6 +187,13 @@ void Editor::selectAnimation(int a) {
     setMode(Mode::Animate);
 }
 
+void Editor::selectEvent(int e) {
+    sel_.clear();
+    if (e < 0 || e >= (int)sk_.events.size()) return;
+    sel_.kind = Selection::Event;
+    sel_.index = e;
+}
+
 void Editor::validateSelection() {
     if (sel_.bone >= (int)sk_.bones.size()) sel_.bone = -1;
     if (sel_.slot >= (int)sk_.slots.size()) sel_.slot = -1;
@@ -179,6 +204,7 @@ void Editor::validateSelection() {
     case Selection::Attachment: if (sel_.slot < 0 || sel_.attachment < 0) sel_.kind = Selection::None; break;
     case Selection::Animation: if (sel_.index >= (int)sk_.animations.size()) sel_.kind = Selection::None; break;
     case Selection::Image: if (sel_.index >= (int)sk_.images.size()) sel_.kind = Selection::None; break;
+    case Selection::Event: if (sel_.index >= (int)sk_.events.size()) sel_.kind = Selection::None; break;
     default: break;
     }
     Attachment* a = selectedAttachment();
@@ -232,6 +258,10 @@ void Editor::updatePose() {
             l.scaleX = p.local.scaleX;
             l.scaleY = p.local.scaleY;
         }
+        if (p.shear) {
+            l.shearX = p.local.shearX;
+            l.shearY = p.local.shearY;
+        }
     }
     updateWorld(sk_, pose_);
 }
@@ -284,7 +314,7 @@ int Editor::createAnimation() {
 }
 
 static void writeBoneKeys(Animation& an, const Bone& bone, int index, float t, const Transform& local, bool rot,
-                          bool trans, bool scale) {
+                          bool trans, bool scale, bool shear) {
     const Transform& s = bone.setup;
     if (rot) setRotateKey(an, index, t, local.rotation - s.rotation);
     if (trans) setTranslateKey(an, index, t, {local.x - s.x, local.y - s.y});
@@ -292,9 +322,10 @@ static void writeBoneKeys(Animation& an, const Bone& bone, int index, float t, c
         auto ratio = [](float v, float base) { return std::fabs(base) > 1e-6f ? v / base : 1.0f; };
         setScaleKey(an, index, t, {ratio(local.scaleX, s.scaleX), ratio(local.scaleY, s.scaleY)});
     }
+    if (shear) setShearKey(an, index, t, {local.shearX - s.shearX, local.shearY - s.shearY});
 }
 
-void Editor::setBoneLocal(int bone, const Transform& local, bool rot, bool trans, bool scale) {
+void Editor::setBoneLocal(int bone, const Transform& local, bool rot, bool trans, bool scale, bool shear) {
     if (bone < 0 || bone >= (int)sk_.bones.size()) return;
     if (mode_ == Mode::Setup) {
         Transform& s = sk_.bones[bone].setup;
@@ -307,17 +338,22 @@ void Editor::setBoneLocal(int bone, const Transform& local, bool rot, bool trans
             s.scaleX = local.scaleX;
             s.scaleY = local.scaleY;
         }
+        if (shear) {
+            s.shearX = local.shearX;
+            s.shearY = local.shearY;
+        }
         updatePose();
         return;
     }
     if (!currentAnimation()) createAnimation();
     if (autoKey_) {
-        writeBoneKeys(*currentAnimation(), sk_.bones[bone], bone, time_, local, rot, trans, scale);
+        writeBoneKeys(*currentAnimation(), sk_.bones[bone], bone, time_, local, rot, trans, scale, shear);
         auto it = pending_.find(bone);
         if (it != pending_.end()) {
             if (rot) it->second.rot = false;
             if (trans) it->second.trans = false;
             if (scale) it->second.scale = false;
+            if (shear) it->second.shear = false;
         }
     } else {
         PendingChange& p = pending_[bone];
@@ -335,23 +371,29 @@ void Editor::setBoneLocal(int bone, const Transform& local, bool rot, bool trans
             p.local.scaleY = local.scaleY;
             p.scale = true;
         }
+        if (shear) {
+            p.local.shearX = local.shearX;
+            p.local.shearY = local.shearY;
+            p.shear = true;
+        }
         pendingTime_ = time_;
         pendingAnim_ = anim_;
     }
     updatePose();
 }
 
-void Editor::keyBone(int bone, bool rot, bool trans, bool scale) {
+void Editor::keyBone(int bone, bool rot, bool trans, bool scale, bool shear) {
     if (bone < 0 || bone >= (int)sk_.bones.size() || mode_ != Mode::Animate) return;
     checkpoint();
     if (!currentAnimation()) createAnimation();
-    writeBoneKeys(*currentAnimation(), sk_.bones[bone], bone, time_, pose_.local[bone], rot, trans, scale);
+    writeBoneKeys(*currentAnimation(), sk_.bones[bone], bone, time_, pose_.local[bone], rot, trans, scale, shear);
     auto it = pending_.find(bone);
     if (it != pending_.end()) {
         if (rot) it->second.rot = false;
         if (trans) it->second.trans = false;
         if (scale) it->second.scale = false;
-        if (!it->second.rot && !it->second.trans && !it->second.scale) pending_.erase(it);
+        if (shear) it->second.shear = false;
+        if (!it->second.any()) pending_.erase(it);
     }
     updatePose();
 }
@@ -359,7 +401,7 @@ void Editor::keyBone(int bone, bool rot, bool trans, bool scale) {
 void Editor::keyPending() {
     if (mode_ != Mode::Animate) return;
     bool any = false;
-    for (auto& [b, p] : pending_) any |= p.rot || p.trans || p.scale;
+    for (auto& [b, p] : pending_) any |= p.any();
     if (!any) {
         setStatus("没有未打帧的改动");
         return;
@@ -367,7 +409,7 @@ void Editor::keyPending() {
     checkpoint();
     if (!currentAnimation()) createAnimation();
     for (auto& [b, p] : pending_)
-        writeBoneKeys(*currentAnimation(), sk_.bones[b], b, time_, pose_.local[b], p.rot, p.trans, p.scale);
+        writeBoneKeys(*currentAnimation(), sk_.bones[b], b, time_, pose_.local[b], p.rot, p.trans, p.scale, p.shear);
     pending_.clear();
     updatePose();
     setStatus("已为所有改动打关键帧");
@@ -377,7 +419,8 @@ KeyState Editor::boneKeyState(int bone, Channel ch) {
     auto it = pending_.find(bone);
     if (it != pending_.end()) {
         const PendingChange& p = it->second;
-        if ((ch == Channel::Rotate && p.rot) || (ch == Channel::Translate && p.trans) || (ch == Channel::Scale && p.scale))
+        if ((ch == Channel::Rotate && p.rot) || (ch == Channel::Translate && p.trans) || (ch == Channel::Scale && p.scale) ||
+            (ch == Channel::Shear && p.shear))
             return KeyState::Changed;
     }
     Animation* an = currentAnimation();
@@ -387,6 +430,58 @@ KeyState Editor::boneKeyState(int bone, Channel ch) {
 KeyState Editor::slotKeyState(int slot) {
     Animation* an = currentAnimation();
     return an && hasKey(*an, slot, Channel::Attachment, time_) ? KeyState::Keyed : KeyState::None;
+}
+
+KeyState Editor::slotColorKeyState(int slot) {
+    Animation* an = currentAnimation();
+    return an && hasKey(*an, slot, Channel::Color, time_) ? KeyState::Keyed : KeyState::None;
+}
+
+void Editor::setSlotColor(int slot, const Color& color) {
+    if (slot < 0 || slot >= (int)sk_.slots.size()) return;
+    if (mode_ == Mode::Setup) {
+        sk_.slots[slot].color = color;
+    } else {
+        if (!currentAnimation()) createAnimation();
+        setColorKey(*currentAnimation(), slot, time_, color);
+    }
+    updatePose();
+}
+
+void Editor::moveDrawOrder(int slot, int delta) {
+    if (mode_ == Mode::Setup) {
+        moveSlot(slot, delta);
+        return;
+    }
+    std::vector<int> order = pose_.drawOrder;
+    auto it = std::find(order.begin(), order.end(), slot);
+    if (it == order.end()) return;
+    int pos = (int)(it - order.begin()), other = pos + delta;
+    if (other < 0 || other >= (int)order.size()) return;
+    checkpoint();
+    if (!currentAnimation()) createAnimation();
+    std::swap(order[pos], order[other]);
+    setDrawOrderKey(*currentAnimation(), time_, order);
+    updatePose();
+}
+
+void Editor::keyEvent(int event) {
+    if (event < 0 || event >= (int)sk_.events.size() || mode_ != Mode::Animate) return;
+    checkpoint();
+    if (!currentAnimation()) createAnimation();
+    setEventKey(*currentAnimation(), time_, event, sk_.events[event]);
+    setStatus("已在第 " + std::to_string((int)std::round(time_ * fps_)) + " 帧插入事件 " + sk_.events[event].name);
+}
+
+void Editor::triggerEvents(float from, float to) {
+    Animation* an = currentAnimation();
+    if (!an) return;
+    for (const EventKey* k : eventsInRange(*an, from, to)) {
+        if (k->event < 0 || k->event >= (int)sk_.events.size()) continue;
+        std::string text = sk_.events[k->event].name;
+        if (!k->stringValue.empty()) text += " \"" + k->stringValue + "\"";
+        firedEvents_.push_back({text, 1.2f});
+    }
 }
 
 void Editor::setSlotAttachment(int slot, int attachment) {
@@ -579,16 +674,7 @@ void Editor::onFilesDropped(const std::vector<std::string>& paths) {
 }
 
 void Editor::removeSlot(int slot) {
-    if (slot < 0 || slot >= (int)sk_.slots.size()) return;
-    sk_.slots.erase(sk_.slots.begin() + slot);
-    for (auto& an : sk_.animations) {
-        std::map<int, SlotTimeline> st;
-        for (auto& [i, tl] : an.slots) {
-            if (i == slot) continue;
-            st[i > slot ? i - 1 : i] = std::move(tl);
-        }
-        an.slots = std::move(st);
-    }
+    sk_.removeSlot(slot);
     hiddenSlots_.clear();
 }
 
@@ -596,18 +682,7 @@ void Editor::moveSlot(int slot, int delta, bool snapshot) {
     int other = slot + delta;
     if (slot < 0 || other < 0 || slot >= (int)sk_.slots.size() || other >= (int)sk_.slots.size()) return;
     if (snapshot) checkpoint();
-    std::swap(sk_.slots[slot], sk_.slots[other]);
-    for (auto& an : sk_.animations) {
-        auto a = an.slots.find(slot), b = an.slots.find(other);
-        SlotTimeline ta, tb;
-        bool ha = a != an.slots.end(), hb = b != an.slots.end();
-        if (ha) ta = std::move(a->second);
-        if (hb) tb = std::move(b->second);
-        an.slots.erase(slot);
-        an.slots.erase(other);
-        if (ha) an.slots[other] = std::move(ta);
-        if (hb) an.slots[slot] = std::move(tb);
-    }
+    sk_.swapSlots(slot, other);
     if (sel_.slot == slot) sel_.slot = other;
     else if (sel_.slot == other) sel_.slot = slot;
     hiddenSlots_.clear();
@@ -633,6 +708,11 @@ void Editor::renameSelection(const std::string& name) {
     case Selection::Animation:
         checkpoint();
         sk_.animations[sel_.index].name = name;
+        break;
+    case Selection::Event:
+        if (name == sk_.events[sel_.index].name) return;
+        checkpoint();
+        sk_.events[sel_.index].name = sk_.uniqueEventName(name);
         break;
     default:
         break;
@@ -677,6 +757,12 @@ void Editor::deleteSelection() {
         sel_.clear();
         playing_ = false;
         setStatus("已删除动画");
+        return;
+    case Selection::Event:
+        checkpoint();
+        sk_.removeEvent(sel_.index);
+        sel_.clear();
+        setStatus("已删除事件");
         return;
     case Selection::Image: {
         int img = sel_.index;
@@ -779,6 +865,7 @@ void Editor::handleShortcuts() {
     if (pressed(ImGuiKey_C)) setTool(Tool::Rotate);
     if (pressed(ImGuiKey_V)) setTool(Tool::Translate);
     if (pressed(ImGuiKey_X)) setTool(Tool::Scale);
+    if (pressed(ImGuiKey_Z)) setTool(Tool::Shear);
     if (pressed(ImGuiKey_B)) setTool(Tool::Pose);
     if (pressed(ImGuiKey_N)) setTool(Tool::CreateBone);
     if (pressed(ImGuiKey_G)) setTool(Tool::Weights);
@@ -832,7 +919,7 @@ void Editor::drawMenuBar() {
     if (ImGui::BeginMenu("帮助")) {
         ImGui::TextUnformatted(
             "Tab        Setup / Animate 模式\n"
-            "C / V / X  旋转 / 移动 / 缩放\n"
+            "C / V / X / Z  旋转 / 移动 / 缩放 / 斜切\n"
             "B / N / G  姿势 / 建骨骼 / 权重      M 网格\n"
             "右键拖动平移，滚轮缩放；右键单击切回上一个工具\n"
             "F 适配骨架，Ctrl+F 100%，Esc 取消选择\n"
@@ -937,6 +1024,15 @@ void Editor::buildDemo(const std::string& imagePath, float time, bool weightsVie
     setTranslateKey(an, up, 0.0f, {0, 0});
     setTranslateKey(an, up, 0.5f, {0, 12});
     setTranslateKey(an, up, 1.0f, {0, 0});
+    setKeyCurve(an, low, Channel::Rotate, 0.0f, CurveShape::bezier(0.42f, 0, 0.58f, 1));
+    setKeyCurve(an, low, Channel::Rotate, 0.5f, CurveShape::bezier(0.42f, 0, 0.58f, 1));
+    setColorKey(an, 0, 0.0f, Color(1, 1, 1, 1));
+    setColorKey(an, 0, 0.5f, Color(1, 0.75f, 0.75f, 1));
+    setColorKey(an, 0, 1.0f, Color(1, 1, 1, 1));
+    EventDef peak;
+    peak.name = "wave_peak";
+    sk_.events.push_back(peak);
+    setEventKey(an, 0.5f, 0, peak);
     sk_.animations.push_back(an);
     anim_ = 0;
 

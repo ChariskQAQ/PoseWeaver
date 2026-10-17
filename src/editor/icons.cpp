@@ -19,6 +19,10 @@ ImU32 iconColor(Icon icon) {
     case Icon::Rotate: return theme::kRotate;
     case Icon::Translate: return theme::kTranslate;
     case Icon::Scale: return theme::kScale;
+    case Icon::Shear: return theme::kShear;
+    case Icon::Event: return theme::kEvent;
+    case Icon::Color: return theme::kColor;
+    case Icon::Graph: return IM_COL32(110, 220, 120, 255);
     case Icon::Slot: return IM_COL32(120, 200, 255, 255);
     case Icon::Region: return IM_COL32(120, 200, 140, 255);
     case Icon::Mesh: return IM_COL32(110, 200, 230, 255);
@@ -124,6 +128,31 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float size, ImU32 col) {
         dl->AddRect(P(c, s, -0.8f, -0.8f), P(c, s, 0.8f, 0.8f), col, 0, 0, t);
         dl->AddRectFilled(P(c, s, -0.8f, -0.1f), P(c, s, 0.1f, 0.8f), col);
         break;
+    case Icon::Shear: {
+        ImVec2 pts[4] = {P(c, s, -0.75f, 0.75f), P(c, s, -0.25f, -0.75f), P(c, s, 0.75f, -0.75f), P(c, s, 0.25f, 0.75f)};
+        dl->AddPolyline(pts, 4, col, ImDrawFlags_Closed, t * 1.2f);
+        break;
+    }
+    case Icon::Event: {
+        ImVec2 pts[5] = {P(c, s, -0.8f, -0.75f), P(c, s, 0.8f, -0.75f), P(c, s, 0.8f, 0.35f), P(c, s, -0.2f, 0.35f), P(c, s, -0.8f, 0.85f)};
+        dl->AddConvexPolyFilled(pts, 5, col);
+        break;
+    }
+    case Icon::Color:
+        dl->AddCircleFilled(P(c, s, -0.3f, -0.25f), s * 0.45f, IM_COL32(240, 80, 80, 230));
+        dl->AddCircleFilled(P(c, s, 0.3f, -0.25f), s * 0.45f, IM_COL32(80, 220, 90, 230));
+        dl->AddCircleFilled(P(c, s, 0.0f, 0.3f), s * 0.45f, IM_COL32(80, 130, 240, 230));
+        break;
+    case Icon::Graph: {
+        const int n = 12;
+        ImVec2 pts[n + 1];
+        for (int i = 0; i <= n; ++i) {
+            float x = -0.85f + 1.7f * i / n;
+            pts[i] = P(c, s, x, 0.7f - 1.4f * (0.5f - 0.5f * std::cos(3.14159f * i / n)));
+        }
+        dl->AddPolyline(pts, n + 1, col, 0, t * 1.3f);
+        break;
+    }
     case Icon::Local:
     case Icon::Parent:
     case Icon::World: {

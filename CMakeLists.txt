@@ -75,7 +75,8 @@ add_executable(RigEditor
   src/editor/viewport_toolbar.cpp
   src/editor/panel_tree.cpp
   src/editor/panel_properties.cpp
-  src/editor/panel_dopesheet.cpp)
+  src/editor/panel_dopesheet.cpp
+  src/editor/panel_graph.cpp)
 target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR})
 target_link_libraries(RigEditor PRIVATE rigcore imgui)
 if(WIN32)

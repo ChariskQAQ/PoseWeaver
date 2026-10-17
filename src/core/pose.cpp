@@ -9,7 +9,13 @@ void resetToSetup(const Skeleton& sk, Pose& pose) {
     pose.world.assign(sk.bones.size(), Affine{});
     for (size_t i = 0; i < sk.bones.size(); ++i) pose.local[i] = sk.bones[i].setup;
     pose.slotAttachment.resize(sk.slots.size());
-    for (size_t i = 0; i < sk.slots.size(); ++i) pose.slotAttachment[i] = sk.slots[i].activeAttachment;
+    pose.slotColor.resize(sk.slots.size());
+    pose.drawOrder.resize(sk.slots.size());
+    for (size_t i = 0; i < sk.slots.size(); ++i) {
+        pose.slotAttachment[i] = sk.slots[i].activeAttachment;
+        pose.slotColor[i] = sk.slots[i].color;
+        pose.drawOrder[i] = (int)i;
+    }
 }
 
 // Index of the last key whose time <= t, or -1 when t is before the first key.
@@ -28,14 +34,14 @@ static V sampleLerp(const std::vector<K>& keys, float t, V fallback) {
     if (i + 1 >= (int)keys.size()) return keys.back().value;
     const K& a = keys[i];
     const K& b = keys[i + 1];
-    if (a.curve == Curve::Stepped) return a.value;
     float span = b.time - a.time;
-    float f = span > 1e-8f ? (t - a.time) / span : 0.0f;
+    float f = applyCurve(a.curve, span > 1e-8f ? (t - a.time) / span : 0.0f);
     return a.value + (b.value - a.value) * f;
 }
 
 float sample(const std::vector<FloatKey>& keys, float t, float fallback) { return sampleLerp(keys, t, fallback); }
 Vec2 sample(const std::vector<Vec2Key>& keys, float t, Vec2 fallback) { return sampleLerp(keys, t, fallback); }
+Color sample(const std::vector<ColorKey>& keys, float t, const Color& fallback) { return sampleLerp(keys, t, fallback); }
 
 int sample(const std::vector<IntKey>& keys, float t, int fallback) {
     if (keys.empty()) return fallback;
@@ -55,12 +61,21 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
         Vec2 sc = sample(tl.scale, time, Vec2{1, 1});
         l.scaleX = s.scaleX * sc.x;
         l.scaleY = s.scaleY * sc.y;
+        Vec2 sh = sample(tl.shear, time, Vec2{});
+        l.shearX = s.shearX + sh.x;
+        l.shearY = s.shearY + sh.y;
     }
     for (auto& [si, tl] : anim.slots) {
         if (si < 0 || si >= (int)sk.slots.size()) continue;
         int a = sample(tl.attachment, time, sk.slots[si].activeAttachment);
         pose.slotAttachment[si] = a < (int)sk.slots[si].attachments.size() ? a : -1;
+        pose.slotColor[si] = sample(tl.color, time, sk.slots[si].color);
     }
+    // Draw order is stepped: the last key at or before `time` wins (before the first key: setup).
+    const DrawOrderKey* order = nullptr;
+    for (auto& k : anim.drawOrder)
+        if (k.time <= time + kKeyEpsilon) order = &k;
+    if (order && order->order.size() == sk.slots.size()) pose.drawOrder = order->order;
 }
 
 void updateWorld(const Skeleton& sk, Pose& pose) {

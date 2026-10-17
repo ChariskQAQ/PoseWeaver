@@ -29,7 +29,7 @@
 
 ```
 Skeleton
-  bones[]      : name, parent(索引, -1 为根), length, setup{x,y,rotation,scaleX,scaleY}
+  bones[]      : name, parent(索引, -1 为根), length, setup{x,y,rotation,scaleX,scaleY,shearX,shearY}
                  计算世界矩阵时用 Skeleton::updateOrder() 保证父骨骼先于子骨骼
   slots[]      : name, bone, attachments[], activeAttachment(-1 为空)   ← 数组顺序 = 绘制顺序
   attachment   : Region { image, x,y,rotation,scaleX,scaleY }
@@ -37,27 +37,25 @@ Skeleton
                           vertices[] (未绑定: 相对 slot 骨骼的坐标),
                           weights[][] (已绑定: 每顶点若干 {bone, 骨骼局部坐标, weight}) }
   images[]     : 相对工程文件的路径
+  events[]     : name, int, float, string, audio（事件定义，关键帧可覆盖数值）
   animations[] : name, duration,
-                 boneTimelines[bone] { rotate/translate/scale 关键帧 }
-                 slotTimelines[slot] { attachment 关键帧 }
-                 每个关键帧: time, value, curve(linear|stepped)
+                 boneTimelines[bone] { rotate/translate/scale/shear 关键帧 }
+                 slotTimelines[slot] { attachment / color 关键帧 }
+                 drawOrder[] { time, 插槽排列 }   events[] { time, event, 覆盖值 }
+                 曲线: linear | stepped | bezier(cx1,cy1,cx2,cy2)，作用于该帧到下一帧
 ```
 
 ## 坐标与变换
 
 - 世界坐标 y 轴向上（和 Spine 一致），视口绘制时翻转。
-- 旋转用角度制。骨骼世界矩阵 = 父世界矩阵 × T(x,y) × R(rot) × S(sx,sy)。
-- 动画值是相对 setup 的增量：旋转/位移为相加，缩放为相乘。
+- 旋转、斜切用角度制。局部矩阵的 X 轴方向 = rotation + shearX，Y 轴方向 = rotation + 90 + shearY，长度分别为 scaleX、scaleY；世界矩阵 = 父世界矩阵 × 局部矩阵。
+- 动画值是相对 setup 的增量：旋转/位移/斜切为相加，缩放为相乘；插槽颜色为绝对值。
 - 已绑定网格的顶点位置 = Σ wᵢ · Boneᵢ.world × localᵢ，localᵢ 在绑定时由 setup 姿态求逆得到。
 
 ## 撤销
 
 每次“提交”一次编辑前把整个 Skeleton 序列化快照入栈（上限 200）。文档规模小，实现简单可靠。
 
-## 尚未实现（后续路线）
+## 尚未实现
 
-- 曲线编辑器（贝塞尔插值）、网格 deform 关键帧、slot 颜色关键帧
-- IK / 变换约束 / 路径约束
-- 皮肤（skins）、事件关键帧、多选骨骼
-- 任意轮廓网格（手绘外轮廓 + Delaunay 三角化），目前只有按透明度裁剪的规则网格
-- 纹理图集打包、游戏运行时（`core/` 可直接复用）
+见 [ROADMAP.md](ROADMAP.md)：按 Spine 专业版功能表列出全部待做功能与分阶段计划。

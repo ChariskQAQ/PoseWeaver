@@ -306,36 +306,61 @@ void Editor::drawTree() {
     for (size_t i = 0; i < sk_.bones.size(); ++i)
         if (sk_.bones[i].parent < 0) drawBone((int)i);
 
-    // ---- draw order ----
+    // ---- draw order (front first; in Animate mode this is the animated order and edits are keyed) ----
     ImGui::TableNextRow();
+    if (animate && an &&
+        keyCell("dok", hasKey(*an, -1, Channel::DrawOrder, time_) ? KeyState::Keyed : KeyState::None, "为当前绘制顺序打关键帧")) {
+        checkpoint();
+        setDrawOrderKey(*an, time_, pose_.drawOrder);
+    }
     RowResult dor = treeRow("draworder", Icon::DrawOrder, "绘制顺序", false, sk_.slots.empty(), false);
+    int moveFrom = -1, moveTo = -1;
     if (dor.open) {
-        for (int s = (int)sk_.slots.size() - 1; s >= 0; --s) {
+        for (int i = (int)pose_.drawOrder.size() - 1; i >= 0; --i) {
+            int s = pose_.drawOrder[i];
             ImGui::PushID(5000 + s);
             ImGui::TableNextRow();
             bool selected = (sel_.kind == Selection::Slot) && sel_.slot == s;
             RowResult r = treeRow("o", Icon::Slot, sk_.slots[s].name, selected, true, false);
             if (r.clicked) selectSlot(s);
-            if (setup && ImGui::BeginDragDropSource()) {
+            if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("DRAWORDER", &s, sizeof(int));
                 ImGui::Text("移动 %s", sk_.slots[s].name.c_str());
                 ImGui::EndDragDropSource();
             }
-            if (setup && ImGui::BeginDragDropTarget()) {
+            if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("DRAWORDER")) {
-                    int from = *(const int*)p->Data;
-                    if (from != s) {
-                        checkpoint();
-                        int step = from < s ? 1 : -1;
-                        for (int i = from; i != s; i += step) moveSlot(i, step, false);
-                        selectSlot(s);
-                    }
+                    moveFrom = *(const int*)p->Data;
+                    moveTo = s;
                 }
                 ImGui::EndDragDropTarget();
             }
             ImGui::PopID();
         }
         ImGui::TreePop();
+    }
+    if (moveFrom >= 0 && moveFrom != moveTo) {
+        // Move `moveFrom` to the draw order position currently held by `moveTo`.
+        std::vector<int> order = pose_.drawOrder;
+        int to = (int)(std::find(order.begin(), order.end(), moveTo) - order.begin());
+        order.erase(std::find(order.begin(), order.end(), moveFrom));
+        order.insert(order.begin() + to, moveFrom);
+        checkpoint();
+        if (setup) {
+            // Setup order is the slot array itself: apply the permutation with swaps.
+            for (int pos = 0; pos < (int)order.size(); ++pos) {
+                int cur = order[pos];
+                if (cur == pos) continue;
+                sk_.swapSlots(pos, cur);
+                for (int& o : order) o = o == pos ? cur : (o == cur ? pos : o);
+            }
+            hiddenSlots_.clear();
+            selectSlot(to);
+        } else {
+            if (!an) an = &sk_.animations[createAnimation()];
+            setDrawOrderKey(*an, time_, order);
+            updatePose();
+        }
     }
 
     // ---- animations ----
@@ -357,6 +382,42 @@ void Editor::drawTree() {
             RowResult r = treeRow("a", Icon::Animation, sk_.animations[i].name, selected, true, false,
                                   active ? 0 : IM_COL32(160, 160, 160, 255));
             if (r.clicked) selectAnimation(i);
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+
+    // ---- events ----
+    ImGui::TableNextRow();
+    RowResult evs = treeRow("events", Icon::Event, "事件", false, false, false);
+    if (evs.doubleClicked) {
+        checkpoint();
+        EventDef e;
+        e.name = sk_.uniqueEventName("event");
+        sk_.events.push_back(e);
+        selectEvent((int)sk_.events.size() - 1);
+    }
+    if (evs.rightClicked) ImGui::OpenPopup("evctx");
+    if (ImGui::BeginPopup("evctx")) {
+        if (ImGui::MenuItem("新建事件")) {
+            checkpoint();
+            EventDef e;
+            e.name = sk_.uniqueEventName("event");
+            sk_.events.push_back(e);
+            selectEvent((int)sk_.events.size() - 1);
+        }
+        ImGui::EndPopup();
+    }
+    if (evs.open) {
+        for (int i = 0; i < (int)sk_.events.size(); ++i) {
+            ImGui::PushID(15000 + i);
+            ImGui::TableNextRow();
+            if (animate && an && keyCell("k", hasKey(*an, i, Channel::Event, time_) ? KeyState::Keyed : KeyState::None,
+                                         "在当前帧插入该事件"))
+                keyEvent(i);
+            bool selected = sel_.kind == Selection::Event && sel_.index == i;
+            RowResult r = treeRow("e", Icon::Event, sk_.events[i].name, selected, true, false);
+            if (r.clicked) selectEvent(i);
             ImGui::PopID();
         }
         ImGui::TreePop();

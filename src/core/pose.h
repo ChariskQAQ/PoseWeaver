@@ -8,6 +8,8 @@ struct Pose {
     std::vector<Transform> local;     // per bone
     std::vector<Affine> world;        // per bone
     std::vector<int> slotAttachment;  // per slot, -1 = none
+    std::vector<Color> slotColor;     // per slot
+    std::vector<int> drawOrder;       // slot indices, back to front
 };
 
 void resetToSetup(const Skeleton& sk, Pose& pose);
@@ -19,6 +21,7 @@ Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time);
 float sample(const std::vector<FloatKey>& keys, float t, float fallback);
 Vec2 sample(const std::vector<Vec2Key>& keys, float t, Vec2 fallback);
 int sample(const std::vector<IntKey>& keys, float t, int fallback);
+Color sample(const std::vector<ColorKey>& keys, float t, const Color& fallback);
 
 // Tip of a bone (end of its length along the local x axis) in world space.
 Vec2 boneTip(const Bone& bone, const Affine& world);
