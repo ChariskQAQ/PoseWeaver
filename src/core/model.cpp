@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <iterator>
 
 namespace rig {
 
@@ -146,6 +147,14 @@ static void remapSlots(std::vector<Animation>& animations, const std::vector<int
     }
 }
 
+// Clipping attachments reference their end slot by index.
+static void remapClipEnds(std::vector<Slot>& slots, const std::vector<int>& slotRemap) {
+    for (auto& s : slots)
+        for (auto& a : s.attachments)
+            if (a.type == AttachmentType::Clipping && a.endSlot >= 0)
+                a.endSlot = a.endSlot < (int)slotRemap.size() ? slotRemap[a.endSlot] : -1;
+}
+
 void Skeleton::removeBone(int bone) {
     if (bone < 0 || bone >= (int)bones.size()) return;
     Pose setupPose = makeSetupPose(*this);
@@ -208,6 +217,7 @@ void Skeleton::removeBone(int bone) {
         anim.bones = std::move(bt);
     }
     remapSlots(animations, slotRemap);
+    remapClipEnds(slots, slotRemap);
 }
 
 bool Skeleton::reparentBone(int bone, int newParent) {
@@ -226,6 +236,7 @@ void Skeleton::removeSlot(int slot) {
     for (int i = 0; i < (int)slots.size(); ++i) slotRemap[i] = i < slot ? i : (i == slot ? -1 : i - 1);
     slots.erase(slots.begin() + slot);
     remapSlots(animations, slotRemap);
+    remapClipEnds(slots, slotRemap);
 }
 
 void Skeleton::swapSlots(int a, int b) {
@@ -234,6 +245,48 @@ void Skeleton::swapSlots(int a, int b) {
     std::vector<int> slotRemap(slots.size());
     for (int i = 0; i < (int)slots.size(); ++i) slotRemap[i] = i == a ? b : (i == b ? a : i);
     remapSlots(animations, slotRemap);
+    remapClipEnds(slots, slotRemap);
+}
+
+void Skeleton::removeAttachment(int slot, int attachment) {
+    if (slot < 0 || slot >= (int)slots.size()) return;
+    Slot& s = slots[slot];
+    if (attachment < 0 || attachment >= (int)s.attachments.size()) return;
+    s.attachments.erase(s.attachments.begin() + attachment);
+    if (s.activeAttachment == attachment) s.activeAttachment = -1;
+    else if (s.activeAttachment > attachment) --s.activeAttachment;
+    for (auto& an : animations) {
+        auto it = an.slots.find(slot);
+        if (it == an.slots.end()) continue;
+        for (auto& k : it->second.attachment) {
+            if (k.value == attachment) k.value = -1;
+            else if (k.value > attachment) --k.value;
+        }
+        std::map<int, std::vector<DeformKey>> deform;
+        for (auto& [a, keys] : it->second.deform)
+            if (a != attachment) deform[a > attachment ? a - 1 : a] = std::move(keys);
+        it->second.deform = std::move(deform);
+        if (it->second.empty()) an.slots.erase(it);
+    }
+}
+
+int Skeleton::dropStaleDeformKeys(int slot, int attachment) {
+    if (slot < 0 || slot >= (int)slots.size() || attachment < 0 || attachment >= (int)slots[slot].attachments.size()) return 0;
+    size_t n = slots[slot].attachments[attachment].vertexCount();
+    int dropped = 0;
+    for (auto& an : animations) {
+        auto it = an.slots.find(slot);
+        if (it == an.slots.end()) continue;
+        auto d = it->second.deform.find(attachment);
+        if (d == it->second.deform.end()) continue;
+        auto& keys = d->second;
+        size_t before = keys.size();
+        keys.erase(std::remove_if(keys.begin(), keys.end(), [&](const DeformKey& k) { return k.value.size() != n; }), keys.end());
+        dropped += (int)(before - keys.size());
+        if (keys.empty()) it->second.deform.erase(d);
+        if (it->second.empty()) an.slots.erase(it);
+    }
+    return dropped;
 }
 
 void Skeleton::removeEvent(int event) {
@@ -301,6 +354,10 @@ void setShearKey(Animation& anim, int bone, float time, Vec2 value) { upsert(ani
 void setAttachmentKey(Animation& anim, int slot, float time, int attachment) { upsert(anim.slots[slot].attachment, time, attachment); }
 void setColorKey(Animation& anim, int slot, float time, const Color& color) { upsert(anim.slots[slot].color, time, color); }
 
+void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets) {
+    upsert(anim.slots[slot].deform[attachment], time, offsets);
+}
+
 void setDrawOrderKey(Animation& anim, float time, const std::vector<int>& order) {
     if (DrawOrderKey* k = findAt(anim.drawOrder, time)) {
         k->order = order;
@@ -321,8 +378,19 @@ void setEventKey(Animation& anim, float time, int event, const EventDef& def) {
     insertSorted(anim.events, k);
 }
 
-bool removeKey(Animation& anim, int index, Channel ch, float time) {
+bool removeKey(Animation& anim, int index, Channel ch, float time, int sub) {
     switch (ch) {
+    case Channel::Deform: {
+        auto it = anim.slots.find(index);
+        if (it == anim.slots.end()) return false;
+        bool ok = false;
+        for (auto& [a, keys] : it->second.deform)
+            if (sub < 0 || a == sub) ok = eraseAt(keys, time) || ok;
+        for (auto d = it->second.deform.begin(); d != it->second.deform.end();)
+            d = d->second.empty() ? it->second.deform.erase(d) : std::next(d);
+        if (it->second.empty()) anim.slots.erase(it);
+        return ok;
+    }
     case Channel::DrawOrder: return eraseAt(anim.drawOrder, time);
     case Channel::Event: {
         auto it = std::find_if(anim.events.begin(), anim.events.end(), [&](const EventKey& k) {
@@ -355,8 +423,15 @@ bool removeKey(Animation& anim, int index, Channel ch, float time) {
     }
 }
 
-bool hasKey(const Animation& anim, int index, Channel ch, float time) {
+bool hasKey(const Animation& anim, int index, Channel ch, float time, int sub) {
     switch (ch) {
+    case Channel::Deform: {
+        auto it = anim.slots.find(index);
+        if (it == anim.slots.end()) return false;
+        for (auto& [a, keys] : it->second.deform)
+            if ((sub < 0 || a == sub) && contains(keys, time)) return true;
+        return false;
+    }
     case Channel::DrawOrder: return contains(anim.drawOrder, time);
     case Channel::Event:
         for (auto& k : anim.events)
@@ -381,7 +456,15 @@ bool hasKey(const Animation& anim, int index, Channel ch, float time) {
 }
 
 // Pointer to the curve of a curve-carrying key, or null.
-static CurveShape* curveAt(Animation& anim, int index, Channel ch, float time) {
+static CurveShape* curveAt(Animation& anim, int index, Channel ch, float time, int sub) {
+    if (ch == Channel::Deform) {
+        auto it = anim.slots.find(index);
+        if (it == anim.slots.end()) return nullptr;
+        auto d = it->second.deform.find(sub);
+        if (d == it->second.deform.end()) return nullptr;
+        DeformKey* k = findAt(d->second, time);
+        return k ? &k->curve : nullptr;
+    }
     if (ch == Channel::Color) {
         auto it = anim.slots.find(index);
         if (it == anim.slots.end()) return nullptr;
@@ -401,12 +484,19 @@ static CurveShape* curveAt(Animation& anim, int index, Channel ch, float time) {
     return k ? &k->curve : nullptr;
 }
 
-void setKeyCurve(Animation& anim, int index, Channel ch, float time, const CurveShape& curve) {
-    if (CurveShape* c = curveAt(anim, index, ch, time)) *c = curve;
+void setKeyCurve(Animation& anim, int index, Channel ch, float time, const CurveShape& curve, int sub) {
+    if (ch == Channel::Deform && sub < 0) {  // every deformed attachment of the slot
+        auto it = anim.slots.find(index);
+        if (it == anim.slots.end()) return;
+        for (auto& [a, keys] : it->second.deform)
+            if (CurveShape* c = curveAt(anim, index, ch, time, a)) *c = curve;
+        return;
+    }
+    if (CurveShape* c = curveAt(anim, index, ch, time, sub)) *c = curve;
 }
 
-const CurveShape* keyCurve(const Animation& anim, int index, Channel ch, float time) {
-    return curveAt(const_cast<Animation&>(anim), index, ch, time);
+const CurveShape* keyCurve(const Animation& anim, int index, Channel ch, float time, int sub) {
+    return curveAt(const_cast<Animation&>(anim), index, ch, time, sub);
 }
 
 template <typename K>
@@ -431,6 +521,7 @@ static void shiftBone(BoneTimeline& tl, float from, float to) {
 static void shiftSlot(SlotTimeline& tl, float from, float to) {
     shiftKey(tl.attachment, from, to);
     shiftKey(tl.color, from, to);
+    for (auto& [a, keys] : tl.deform) shiftKey(keys, from, to);
 }
 
 // Events at `from` (optionally only one event) move to `to`; several events may share a time.
@@ -469,8 +560,15 @@ void moveRowKeys(Animation& anim, bool isSlot, int index, float from, float to) 
     }
 }
 
-void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to) {
+void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to, int sub) {
     switch (ch) {
+    case Channel::Deform: {
+        auto it = anim.slots.find(index);
+        if (it == anim.slots.end()) return;
+        for (auto& [a, keys] : it->second.deform)
+            if (sub < 0 || a == sub) shiftKey(keys, from, to);
+        return;
+    }
     case Channel::DrawOrder: shiftKey(anim.drawOrder, from, to); return;
     case Channel::Event: shiftEvents(anim, index, from, to); return;
     case Channel::Attachment:
@@ -502,6 +600,8 @@ static void addTimes(std::vector<float>& out, const BoneTimeline& tl) {
 static void addTimes(std::vector<float>& out, const SlotTimeline& tl) {
     for (auto& k : tl.attachment) out.push_back(k.time);
     for (auto& k : tl.color) out.push_back(k.time);
+    for (auto& [a, keys] : tl.deform)
+        for (auto& k : keys) out.push_back(k.time);
 }
 
 static void uniqueSorted(std::vector<float>& t) {

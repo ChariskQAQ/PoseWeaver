@@ -10,7 +10,10 @@ struct Pose {
     std::vector<int> slotAttachment;  // per slot, -1 = none
     std::vector<Color> slotColor;     // per slot
     std::vector<int> drawOrder;       // slot indices, back to front
+    std::map<std::pair<int, int>, std::vector<Vec2>> deform;  // (slot, attachment) -> vertex offsets
 };
+// Deform offsets of an attachment in this pose, or null.
+const std::vector<Vec2>* findDeform(const Pose& pose, int slot, int attachment);
 
 void resetToSetup(const Skeleton& sk, Pose& pose);
 void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose& pose);
@@ -31,9 +34,12 @@ struct Geometry {
     std::vector<Vec2> uvs;
     std::vector<int> triangles;
 };
-void computeGeometry(const Skeleton& sk, const Pose& pose, const Slot& slot,
-                     const Attachment& att, Geometry& out);
-std::vector<Vec2> computeVertices(const Skeleton& sk, const Pose& pose, const Slot& slot,
-                                  const Attachment& att);
+// `deform` (optional) holds per-vertex offsets, see DeformKey.
+void computeGeometry(const Skeleton& sk, const Pose& pose, const Slot& slot, const Attachment& att, Geometry& out,
+                     const std::vector<Vec2>* deform = nullptr);
+std::vector<Vec2> computeVertices(const Skeleton& sk, const Pose& pose, const Slot& slot, const Attachment& att,
+                                  const std::vector<Vec2>* deform = nullptr);
+// Linear part that maps a deform offset of `vertex` to world space in `pose`.
+Affine deformBasis(const Pose& pose, const Slot& slot, const Attachment& att, int vertex);
 
 } // namespace rig

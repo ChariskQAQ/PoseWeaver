@@ -94,7 +94,7 @@ struct ToolValues {
 }
 
 void Editor::drawMainToolbar() {
-    const float h = groupHeight(5);
+    const float h = groupHeight(5);  // tools / transform rows; the options table has a header + 4 rows
     const float fh = ImGui::GetFrameHeight();
     const bool animate = mode_ == Mode::Animate;
     float x = canvasOrigin_.x + 8 + fh * 1.15f + 10 + 10;
@@ -110,7 +110,10 @@ void Editor::drawMainToolbar() {
         if (iconButton("create", Icon::Create, "建骨骼 N", tool_ == Tool::CreateBone, w, !animate)) setTool(Tool::CreateBone);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("先选父骨骼，再单击或拖动创建子骨骼；Shift 保持父骨骼选中");
-        if (iconButton("mesh", Icon::MeshTool, "网格 M", tool_ == Tool::MeshEdit, w, !animate)) setTool(Tool::MeshEdit);
+        if (iconButton("mesh", animate ? Icon::Deform : Icon::MeshTool, animate ? "变形 M" : "网格 M", tool_ == Tool::MeshEdit, w))
+            setTool(Tool::MeshEdit);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(animate ? "拖动网格顶点，打变形关键帧" : "拖动顶点，Alt+点击加顶点，Del 删除，空白处框选");
     }
     endGroup();
     nextX();
@@ -338,6 +341,7 @@ void Editor::drawMainToolbar() {
             line("骨骼", &view_.bonesVisible, &view_.bonesSelectable, &view_.boneNames);
             line("图片", &view_.imagesVisible, &view_.imagesSelectable, nullptr);
             line("网格线", &view_.meshVisible, nullptr, nullptr);
+            line("剪裁/边界框", &view_.polygonsVisible, nullptr, nullptr);
             ImGui::EndTable();
         }
     }

@@ -283,7 +283,7 @@ void Editor::setMode(Mode m) {
     mode_ = m;
     playing_ = false;
     if (m == Mode::Animate) {
-        if (tool_ == Tool::CreateBone || tool_ == Tool::MeshEdit || tool_ == Tool::Weights) setTool(Tool::Rotate);
+        if (tool_ == Tool::CreateBone || tool_ == Tool::Weights) setTool(Tool::Rotate);
         if (!currentAnimation()) {
             if (!sk_.animations.empty()) anim_ = 0;
             else createAnimation();
@@ -292,7 +292,7 @@ void Editor::setMode(Mode m) {
 }
 
 void Editor::setTool(Tool t) {
-    bool setupOnly = t == Tool::CreateBone || t == Tool::MeshEdit || t == Tool::Weights;
+    bool setupOnly = t == Tool::CreateBone || t == Tool::Weights;  // the mesh tool keys deforms in Animate mode
     if (setupOnly && mode_ != Mode::Setup) {
         setStatus("该工具只能在 Setup 模式下使用");
         return;
@@ -733,19 +733,8 @@ void Editor::deleteSelection() {
             return;
         }
         checkpoint();
-        int s = sel_.slot, cur = sel_.attachment;
-        Slot& slot = sk_.slots[s];
-        slot.attachments.erase(slot.attachments.begin() + cur);
-        if (slot.activeAttachment == cur) slot.activeAttachment = -1;
-        else if (slot.activeAttachment > cur) --slot.activeAttachment;
-        for (auto& an : sk_.animations) {
-            auto it = an.slots.find(s);
-            if (it == an.slots.end()) continue;
-            for (auto& k : it->second.attachment) {
-                if (k.value == cur) k.value = -1;
-                else if (k.value > cur) --k.value;
-            }
-        }
+        int s = sel_.slot;
+        sk_.removeAttachment(s, sel_.attachment);
         selectSlot(s);
         setStatus("已删除附件");
         return;
@@ -805,6 +794,138 @@ void Editor::deleteSelection() {
     default:
         return;
     }
+}
+
+// ---------------------------------------------------------------- mesh & polygon editing
+
+void Editor::afterTopologyChange(int slot, int attachment) {
+    int dropped = sk_.dropStaleDeformKeys(slot, attachment);
+    if (dropped > 0) setStatus("顶点数变化，已删除 " + std::to_string(dropped) + " 个变形关键帧");
+    sel_.vertices.clear();
+    updatePose();
+}
+
+void Editor::meshAddVertexAt(ImVec2 mouse) {
+    Attachment* att = selectedAttachment();
+    if (!att || !att->hasVertices()) {
+        setStatus("先选择一个网格、剪裁或边界框附件");
+        return;
+    }
+    int s = sel_.slot, a = attachmentIndex(s, att);
+    const Slot& slot = sk_.slots[s];
+    checkpoint();
+    if (!att->isPolygon() && att->hullLength < 3 && !ensureHull(*att)) {
+        setStatus("这个网格有多个外轮廓，无法加顶点：请先“自动生成网格”");
+        return;
+    }
+    Pose setup = makeSetupPose(sk_);
+    Vec2 local = setup.world[slot.bone].inverse().apply(toWorld(mouse));
+    std::vector<Vec2> verts = computeVertices(sk_, setup, slot, *att);
+    int hull = att->isPolygon() ? (int)verts.size() : att->hullLength;
+    // Nearest outline edge (screen space) decides where an outline vertex goes.
+    int edge = -1;
+    float best = 1e9f;
+    std::vector<Vec2> outline;
+    for (int i = 0; i < hull; ++i) {
+        outline.push_back(verts[i]);
+        float d = distToSegment({mouse.x, mouse.y}, {toScreen(verts[i]).x, toScreen(verts[i]).y},
+                                {toScreen(verts[(i + 1) % hull]).x, toScreen(verts[(i + 1) % hull]).y});
+        if (d < best) {
+            best = d;
+            edge = i;
+        }
+    }
+    bool inside = !att->isPolygon() && pointInPolygon(toWorld(mouse), outline);
+    int hullAfter = (inside && best > 8.0f * uiScale_) ? -1 : edge;
+    const Image* img = att->image >= 0 && att->image < (int)sk_.images.size() ? &sk_.images[att->image] : nullptr;
+    int v = addMeshVertex(sk_, slot, *att, img, local, hullAfter);
+    afterTopologyChange(s, a);
+    if (v >= 0) sel_.vertices = {v};
+}
+
+void Editor::meshDeleteSelectedVertices() {
+    Attachment* att = selectedAttachment();
+    if (!att || !att->hasVertices() || sel_.vertices.empty()) return;
+    int s = sel_.slot, a = attachmentIndex(s, att);
+    checkpoint();
+    if (!removeMeshVertices(sk_, sk_.slots[s], *att, sel_.vertices)) {
+        setStatus("外轮廓至少需要 3 个顶点");
+        return;
+    }
+    afterTopologyChange(s, a);
+}
+
+bool Editor::autoMesh(int s, int a) {
+    Attachment& att = sk_.slots[s].attachments[a];
+    if (att.image < 0 || att.image >= (int)textures_.size() || textures_[att.image].rgba.empty()) {
+        setStatus("图片未加载，无法生成网格");
+        return false;
+    }
+    const Texture& tex = textures_[att.image];
+    std::vector<Vec2> outline = traceAlphaOutline(tex.rgba.data(), tex.width, tex.height, 8, outlineTolerance_, outlinePadding_);
+    if (outline.empty()) {
+        setStatus("图片完全透明，无法生成网格");
+        return false;
+    }
+    std::vector<int> bones = att.isWeighted() ? meshBones(att) : std::vector<int>{};
+    Attachment copy = att;
+    if (copy.isWeighted()) unbindMesh(sk_, sk_.slots[s], copy);
+    float spacing = meshDensity_ > 0 ? std::max(tex.width, tex.height) / (float)meshDensity_ : 0.0f;
+    if (!buildMeshFromOutline(sk_, sk_.slots[s], copy, sk_.images[att.image], outline, spacing)) {
+        setStatus("生成网格失败");
+        return false;
+    }
+    if (!bones.empty()) bindMesh(sk_, sk_.slots[s], copy, bones);
+    checkpoint();
+    att = std::move(copy);
+    afterTopologyChange(s, a);
+    setStatus("已生成网格：" + std::to_string(att.vertexCount()) + " 个顶点" + (bones.empty() ? "" : "，已按原骨骼重新绑定"));
+    return true;
+}
+
+void Editor::createPolygonAttachment(int s, AttachmentType type) {
+    if (s < 0 || s >= (int)sk_.slots.size()) return;
+    bool clipping = type == AttachmentType::Clipping;
+    // Outline: bounding box of the slot's visible attachment, else a square around the bone.
+    Pose setup = makeSetupPose(sk_);
+    const Slot& src = sk_.slots[s];
+    std::vector<Vec2> pts;
+    if (src.activeAttachment >= 0) {
+        std::vector<Vec2> world = computeVertices(sk_, setup, src, src.attachments[src.activeAttachment]);
+        if (!world.empty()) {
+            Vec2 lo = world[0], hi = world[0];
+            for (Vec2 p : world) {
+                lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
+                hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
+            }
+            Affine inv = setup.world[src.bone].inverse();
+            pts = {inv.apply(lo), inv.apply({hi.x, lo.y}), inv.apply(hi), inv.apply({lo.x, hi.y})};
+        }
+    }
+    if (pts.empty()) pts = {{-50, -50}, {50, -50}, {50, 50}, {-50, 50}};
+
+    checkpoint();
+    Slot slot;
+    slot.name = sk_.uniqueSlotName(src.name + (clipping ? "_clip" : "_bbox"));
+    slot.bone = src.bone;
+    Attachment att;
+    att.name = clipping ? "clipping" : "boundingbox";
+    att.type = type;
+    makePolygon(att, pts);
+    slot.attachments.push_back(att);
+    slot.activeAttachment = 0;
+    sk_.slots.push_back(slot);
+    int index = (int)sk_.slots.size() - 1;
+    if (clipping) {
+        // A clipping slot clips the slots drawn after it: put it right below the source slot.
+        for (int i = index; i > s; --i) sk_.swapSlots(i - 1, i);
+        index = s;
+        sk_.slots[index].attachments[0].endSlot = s + 1;
+    }
+    hiddenSlots_.clear();
+    selectAttachment(index, 0);
+    setTool(Tool::MeshEdit);
+    setStatus(clipping ? "已添加剪裁：拖动顶点调整形状，Alt+点击加顶点" : "已添加边界框：拖动顶点调整形状，Alt+点击加顶点");
 }
 
 // ---------------------------------------------------------------- close
@@ -875,7 +996,10 @@ void Editor::handleShortcuts() {
         sel_.clear();
         drag_ = Drag{};
     }
-    if (pressed(ImGuiKey_Delete)) deleteSelection();
+    if (pressed(ImGuiKey_Delete)) {
+        if (tool_ == Tool::MeshEdit && mode_ == Mode::Setup && !sel_.vertices.empty()) meshDeleteSelectedVertices();
+        else deleteSelection();
+    }
     if (pressed(ImGuiKey_F)) frameAll();
     if (mode_ == Mode::Animate) {
         if (pressed(ImGuiKey_Space)) {
@@ -995,7 +1119,7 @@ void Editor::frameAll() {
 
 // ---------------------------------------------------------------- demo
 
-void Editor::buildDemo(const std::string& imagePath, float time, bool weightsView) {
+void Editor::buildDemo(const std::string& imagePath, float time, const std::string& scenario) {
     newProject();
     if (!importImage(imagePath)) return;
     Transform upper;
@@ -1009,7 +1133,9 @@ void Editor::buildDemo(const std::string& imagePath, float time, bool weightsVie
     Slot& slot = sk_.slots[0];
     Attachment& att = slot.attachments[0];
     const Texture& tex = textures_[att.image];
-    convertRegionToMesh(att, sk_.images[att.image], tex.rgba.data(), 3, 12);
+    std::vector<Vec2> outline = traceAlphaOutline(tex.rgba.data(), tex.width, tex.height, 8, 2.0f, 2.0f);
+    if (!buildMeshFromOutline(sk_, slot, att, sk_.images[att.image], outline, tex.height / 12.0f))
+        convertRegionToMesh(att, sk_.images[att.image], tex.rgba.data(), 3, 12);
     bindMesh(sk_, slot, att, {up, low});
 
     Animation an;
@@ -1033,13 +1159,42 @@ void Editor::buildDemo(const std::string& imagePath, float time, bool weightsVie
     peak.name = "wave_peak";
     sk_.events.push_back(peak);
     setEventKey(an, 0.5f, 0, peak);
+    // Deform: the hand end bulges outwards at the peak of the wave.
+    {
+        // Widen the top third sideways (world x), expressed in each vertex's deform space.
+        Pose setup = makeSetupPose(sk_);
+        std::vector<Vec2> world = computeVertices(sk_, setup, slot, att);
+        std::vector<Vec2> bulge(att.vertexCount());
+        for (size_t v = 0; v < bulge.size(); ++v)
+            if (world[v].y > 50)
+                bulge[v] = deformBasis(setup, slot, att, (int)v).inverse().applyVector({world[v].x * 0.6f * (world[v].y - 50) / 80, 0});
+        setDeformKey(an, 0, 0, 0.0f, std::vector<Vec2>(att.vertexCount()));
+        setDeformKey(an, 0, 0, 0.5f, bulge);
+        setDeformKey(an, 0, 0, 1.0f, std::vector<Vec2>(att.vertexCount()));
+    }
     sk_.animations.push_back(an);
     anim_ = 0;
 
     undo_.clear();
     redo_.clear();
     dirty_ = false;
-    if (weightsView) {
+    if (scenario == "clip") {
+        // A clipping slot below the arm that cuts it off with a slanted edge.
+        createPolygonAttachment(0, AttachmentType::Clipping);
+        Attachment& clip = sk_.slots[0].attachments[0];
+        makePolygon(clip, {{-60, -40}, {60, 10}, {60, 260}, {-60, 260}});
+        undo_.clear();
+        dirty_ = false;
+        mode_ = Mode::Animate;
+        time_ = time;
+        tool_ = Tool::Rotate;
+        selectAttachment(0, 0);
+    } else if (scenario == "mesh") {
+        mode_ = Mode::Setup;
+        tool_ = Tool::MeshEdit;
+        selectAttachment(0, 0);
+        sel_.vertices = {0, 1, 2};
+    } else if (scenario == "weights") {
         mode_ = Mode::Setup;
         selectSlot(0);
         tool_ = Tool::Weights;

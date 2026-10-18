@@ -39,7 +39,7 @@ struct Image {
     int width = 0, height = 0;
 };
 
-enum class AttachmentType { Region, Mesh };
+enum class AttachmentType { Region, Mesh, Clipping, BoundingBox };
 
 struct VertexWeight {
     int bone = 0;
@@ -55,14 +55,19 @@ struct Attachment {
     // Region: image centred at the origin, placed by `transform` in slot-bone space.
     Transform transform;
 
-    // Mesh
+    // Mesh, clipping and bounding box attachments share the vertex storage. Polygons
+    // (clipping / bounding box) have no uvs or triangles; their vertices are the outline.
     std::vector<Vec2> uvs;
     std::vector<int> triangles;
     std::vector<Vec2> vertices;                      // unweighted: slot-bone local
     std::vector<std::vector<VertexWeight>> weights;  // weighted: one list per vertex
+    int hullLength = 0;  // mesh: the first hullLength vertices form the outline in order (0 = unknown)
+    int endSlot = -1;    // clipping: last slot (index) that is clipped, -1 = all following slots
 
     bool isWeighted() const { return !weights.empty(); }
-    size_t vertexCount() const { return uvs.size(); }
+    bool isPolygon() const { return type == AttachmentType::Clipping || type == AttachmentType::BoundingBox; }
+    bool hasVertices() const { return type != AttachmentType::Region; }
+    size_t vertexCount() const { return isWeighted() ? weights.size() : vertices.size(); }
 };
 
 struct Slot {
@@ -105,6 +110,9 @@ struct FloatKey { float time = 0; float value = 0; CurveShape curve; };
 struct Vec2Key { float time = 0; Vec2 value; CurveShape curve; };  // one curve drives both components
 struct ColorKey { float time = 0; Color value; CurveShape curve; };
 struct IntKey { float time = 0; int value = -1; };
+// Per-vertex offsets added to a mesh / polygon attachment (slot-bone space for unweighted
+// vertices, blended bone space for weighted ones).
+struct DeformKey { float time = 0; std::vector<Vec2> value; CurveShape curve; };
 // Draw order as slot indices from back to front; always a permutation of all slots.
 struct DrawOrderKey { float time = 0; std::vector<int> order; };
 struct EventKey {
@@ -126,13 +134,19 @@ struct BoneTimeline {
 
 struct SlotTimeline {
     std::vector<IntKey> attachment;
-    std::vector<ColorKey> color;  // absolute colour, replaces the setup colour
-    bool empty() const { return attachment.empty() && color.empty(); }
+    std::vector<ColorKey> color;                    // absolute colour, replaces the setup colour
+    std::map<int, std::vector<DeformKey>> deform;  // per attachment index
+    bool empty() const {
+        if (!attachment.empty() || !color.empty()) return false;
+        for (auto& [a, keys] : deform)
+            if (!keys.empty()) return false;
+        return true;
+    }
 };
 
-enum class Channel { Rotate, Translate, Scale, Shear, Attachment, Color, DrawOrder, Event };
+enum class Channel { Rotate, Translate, Scale, Shear, Attachment, Color, DrawOrder, Event, Deform };
 inline bool isBoneChannel(Channel c) { return c == Channel::Rotate || c == Channel::Translate || c == Channel::Scale || c == Channel::Shear; }
-inline bool isSlotChannel(Channel c) { return c == Channel::Attachment || c == Channel::Color; }
+inline bool isSlotChannel(Channel c) { return c == Channel::Attachment || c == Channel::Color || c == Channel::Deform; }
 
 struct Animation {
     std::string name;
@@ -171,6 +185,10 @@ struct Skeleton {
     void swapSlots(int a, int b);  // swaps setup draw order positions
     // Removes an event definition and its keys.
     void removeEvent(int event);
+    // Removes an attachment from a slot, fixing the active attachment, attachment keys and deform keys.
+    void removeAttachment(int slot, int attachment);
+    // Drops deform keys whose vertex count no longer matches the attachment (after topology edits).
+    int dropStaleDeformKeys(int slot, int attachment);
 };
 
 // Insert or replace a key at `time` (within a small epsilon). Keeps keys sorted.
@@ -183,18 +201,20 @@ void setColorKey(Animation& anim, int slot, float time, const Color& color);
 void setDrawOrderKey(Animation& anim, float time, const std::vector<int>& order);
 // Events can share a time only if they are different events; same event at same time replaces.
 void setEventKey(Animation& anim, float time, int event, const EventDef& def);
+void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets);
 
 // `index` = bone for bone channels, slot for slot channels, event for Event, ignored for DrawOrder.
-bool removeKey(Animation& anim, int index, Channel ch, float time);
-bool hasKey(const Animation& anim, int index, Channel ch, float time);
-void setKeyCurve(Animation& anim, int index, Channel ch, float time, const CurveShape& curve);
-const CurveShape* keyCurve(const Animation& anim, int index, Channel ch, float time);
+// `sub` = attachment index for Deform.
+bool removeKey(Animation& anim, int index, Channel ch, float time, int sub = -1);
+bool hasKey(const Animation& anim, int index, Channel ch, float time, int sub = -1);
+void setKeyCurve(Animation& anim, int index, Channel ch, float time, const CurveShape& curve, int sub = -1);
+const CurveShape* keyCurve(const Animation& anim, int index, Channel ch, float time, int sub = -1);
 // Move every key (all channels) located at `from` to `to`.
 void moveKeys(Animation& anim, float from, float to);
 // Same, restricted to one bone's channels (isSlot = false) or one slot's channels.
 void moveRowKeys(Animation& anim, bool isSlot, int index, float from, float to);
 // Same, restricted to a single channel of one bone or slot (or the draw order / an event).
-void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to);
+void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to, int sub = -1);
 // Sorted, de-duplicated times of every key in the animation (or one row of it).
 std::vector<float> keyTimes(const Animation& anim);
 std::vector<float> rowKeyTimes(const Animation& anim, bool isSlot, int index);

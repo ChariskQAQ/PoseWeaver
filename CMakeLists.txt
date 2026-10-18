@@ -61,6 +61,8 @@ add_library(rigcore STATIC
   src/core/model.cpp
   src/core/pose.cpp
   src/core/mesh_tools.cpp
+  src/core/mesh_edit.cpp
+  src/core/clipping.cpp
   src/core/serialize.cpp)
 target_include_directories(rigcore PUBLIC src ${JSON_HPP_DIR})
 

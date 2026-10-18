@@ -287,11 +287,14 @@ void Editor::drawTree() {
                         if (visCell("v", active, active ? "隐藏该附件" : "显示该附件（Animate 模式下会打关键帧）"))
                             setSlotAttachment(s, active ? -1 : a);
                         bool selected = sel_.kind == Selection::Attachment && sel_.slot == s && sel_.attachment == a;
-                        RowResult r = treeRow("att", att.type == AttachmentType::Mesh ? Icon::Mesh : Icon::Region, att.name,
+                        Icon icon = att.type == AttachmentType::Mesh ? Icon::Mesh : att.type == AttachmentType::Clipping ? Icon::Clipping
+                                    : att.type == AttachmentType::BoundingBox ? Icon::BoundingBox
+                                                                              : Icon::Region;
+                        RowResult r = treeRow("att", icon, att.name,
                                               selected, true, false, active ? 0 : IM_COL32(150, 150, 150, 255));
                         scrollIfSelected(selected);
                         if (r.clicked) selectAttachment(s, a);
-                        if (r.doubleClicked && att.type == AttachmentType::Mesh && setup) setTool(Tool::MeshEdit);
+                        if (r.doubleClicked && att.hasVertices()) setTool(Tool::MeshEdit);
                         ImGui::PopID();
                     }
                 }

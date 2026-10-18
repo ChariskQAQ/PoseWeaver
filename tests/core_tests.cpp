@@ -1,4 +1,5 @@
 // Minimal self-checking tests for rigcore (no framework dependency).
+#include "core/clipping.h"
 #include "core/mesh_tools.h"
 #include "core/pose.h"
 #include "core/serialize.h"
@@ -279,6 +280,233 @@ static void testVersion1Compat() {
     CHECK(!fromJson(R"({"format":"rig","version":99,"images":[],"bones":[],"slots":[],"animations":[]})", sk, &err));
 }
 
+static float trianglesArea(const std::vector<Vec2>& pts, const std::vector<int>& tris) {
+    float a = 0;
+    for (size_t t = 0; t + 2 < tris.size(); t += 3) a += std::fabs(cross(pts[tris[t + 1]] - pts[tris[t]], pts[tris[t + 2]] - pts[tris[t]])) * 0.5f;
+    return a;
+}
+
+static bool hasEdge(const std::vector<int>& tris, int a, int b) {
+    for (size_t t = 0; t + 2 < tris.size(); t += 3)
+        for (int e = 0; e < 3; ++e) {
+            int x = tris[t + e], y = tris[t + (e + 1) % 3];
+            if ((x == a && y == b) || (x == b && y == a)) return true;
+        }
+    return false;
+}
+
+static void testTriangulate() {
+    // Square with one interior point.
+    std::vector<Vec2> sq = {{0, 0}, {10, 0}, {10, 10}, {0, 10}, {5, 5}};
+    std::vector<int> tris;
+    CHECK(triangulate(sq, 4, tris));
+    CHECK(tris.size() == 4 * 3);
+    CHECK(near(trianglesArea(sq, tris), 100));
+    // Concave L shape (clockwise) with interior points: hull edges are kept, area preserved.
+    std::vector<Vec2> l = {{0, 0}, {0, 20}, {10, 20}, {10, 10}, {20, 10}, {20, 0}, {5, 5}, {15, 5}, {5, 15}};
+    CHECK(triangulate(l, 6, tris));
+    CHECK(near(trianglesArea(l, tris), 300, 0.01f));
+    CHECK(tris.size() == (size_t)(2 * 3 + 6 - 2) * 3);
+    for (int i = 0; i < 6; ++i) CHECK(hasEdge(tris, i, (i + 1) % 6));
+    // Delaunay: the four interior points of a grid never produce the long diagonal.
+    std::vector<Vec2> grid = {{0, 0}, {30, 0}, {30, 30}, {0, 30}, {10, 10}, {20, 10}, {20, 20}, {10, 20}};
+    CHECK(triangulate(grid, 4, tris));
+    CHECK(near(trianglesArea(grid, tris), 900));
+    CHECK(!hasEdge(tris, 4, 6) || !hasEdge(tris, 5, 7));
+    // A self-intersecting outline is rejected.
+    std::vector<Vec2> bow = {{0, 0}, {10, 10}, {10, 0}, {0, 10}};
+    CHECK(!triangulate(bow, 4, tris));
+    CHECK(convexHull(bow).size() == 4);
+}
+
+static std::vector<unsigned char> circleImage(int w, int h, float cx, float cy, float r) {
+    std::vector<unsigned char> px(size_t(w) * h * 4, 0);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            if (length(Vec2{x + 0.5f - cx, y + 0.5f - cy}) <= r) px[(size_t(y) * w + x) * 4 + 3] = 255;
+    return px;
+}
+
+static void testOutlineAndMeshBuild() {
+    std::vector<unsigned char> px = circleImage(64, 64, 32, 32, 20);
+    std::vector<Vec2> outline = traceAlphaOutline(px.data(), 64, 64, 8, 1.0f, 0.0f);
+    CHECK(outline.size() >= 6);
+    std::vector<int> idx(outline.size());
+    for (size_t i = 0; i < idx.size(); ++i) idx[i] = (int)i;
+    float area = 0;
+    for (size_t i = 0; i < outline.size(); ++i) area += cross(outline[i], outline[(i + 1) % outline.size()]);
+    area = std::fabs(area) * 0.5f;
+    CHECK(area > 3.14159f * 400 * 0.8f && area < 3.14159f * 400 * 1.2f);
+    std::vector<Vec2> padded = traceAlphaOutline(px.data(), 64, 64, 8, 1.0f, 4.0f);
+    float area2 = 0;
+    for (size_t i = 0; i < padded.size(); ++i) area2 += cross(padded[i], padded[(i + 1) % padded.size()]);
+    CHECK(std::fabs(area2) * 0.5f > area);
+
+    Skeleton sk = makeArm();
+    sk.images.push_back({"c.png", 64, 64});
+    Slot slot;
+    slot.bone = 0;
+    Attachment att;
+    att.image = 0;
+    att.transform.x = 100;  // image centre at (100, 0)
+    slot.attachments.push_back(att);
+    slot.activeAttachment = 0;
+    sk.slots.push_back(slot);
+    Attachment& a = sk.slots[0].attachments[0];
+    Affine before = imageToLocal(sk, sk.slots[0], a, sk.images[0]);
+    CHECK(buildMeshFromOutline(sk, sk.slots[0], a, sk.images[0], outline, 8));
+    CHECK(a.type == AttachmentType::Mesh && a.hullLength >= (int)outline.size());
+    CHECK(a.vertexCount() > outline.size());
+    CHECK(near(trianglesArea(setupLocalVertices(sk, sk.slots[0], a), a.triangles), area, 1.0f));
+    for (Vec2 uv : a.uvs) CHECK(uv.x >= 0 && uv.x <= 1 && uv.y >= 0 && uv.y <= 1);
+    // The fitted mapping of the mesh matches the region mapping it came from.
+    Affine after = imageToLocal(sk, sk.slots[0], a, sk.images[0]);
+    CHECK(near(after.a, before.a) && near(after.d, before.d) && near(after.tx, before.tx, 0.01f) && near(after.ty, before.ty, 0.01f));
+
+    // Add an interior vertex, then remove it again.
+    size_t n = a.vertexCount(), t = a.triangles.size();
+    int v = addMeshVertex(sk, sk.slots[0], a, &sk.images[0], {101, 1}, -1);
+    CHECK(v == (int)n && a.vertexCount() == n + 1 && a.triangles.size() == t + 6);
+    CHECK(near(a.uvs[v].x, 33.0f / 64) && near(a.uvs[v].y, 31.0f / 64));
+    CHECK(removeMeshVertices(sk, sk.slots[0], a, {v}));
+    CHECK(a.vertexCount() == n && a.triangles.size() == t);
+    // Insert into the outline after hull vertex 0.
+    int hullCount = a.hullLength;
+    int hv = addMeshVertex(sk, sk.slots[0], a, &sk.images[0], (setupLocalVertices(sk, sk.slots[0], a)[0] + setupLocalVertices(sk, sk.slots[0], a)[1]) * 0.5f, 0);
+    int hullBefore = a.hullLength;
+    (void)hullBefore;
+    CHECK(hv == 1 && a.hullLength == hullCount + 1);
+    // The outline must keep at least three vertices.
+    std::vector<int> all;
+    for (int i = 0; i < a.hullLength; ++i) all.push_back(i);
+    removeMeshVertices(sk, sk.slots[0], a, all);
+    CHECK(a.hullLength >= 3);
+
+    // Grid meshes get a hull from their boundary.
+    Attachment g;
+    g.image = 0;
+    CHECK(convertRegionToMesh(g, sk.images[0], nullptr, 2, 2));
+    CHECK(ensureHull(g) && g.hullLength == 8);
+    CHECK(near(trianglesArea(g.vertices, g.triangles), 64 * 64));
+}
+
+static void testDeform() {
+    Skeleton sk = makeMeshRig();
+    Slot& s = sk.slots[0];
+    convertRegionToMesh(s.attachments[0], sk.images[0], nullptr, 1, 2);
+    Attachment& a = s.attachments[0];
+    size_t n = a.vertexCount();
+    Animation an;
+    setDeformKey(an, 0, 0, 0, std::vector<Vec2>(n, Vec2{10, 0}));
+    setDeformKey(an, 0, 0, 1, std::vector<Vec2>(n, Vec2{0, 0}));
+    sk.animations.push_back(an);
+    Pose setup = makeSetupPose(sk);
+    Pose p = makeAnimatedPose(sk, &sk.animations[0], 0.5f);
+    const std::vector<Vec2>* d = findDeform(p, 0, 0);
+    CHECK(d && d->size() == n && near((*d)[0], {5, 0}));
+    std::vector<Vec2> base = computeVertices(sk, setup, s, a), moved = computeVertices(sk, p, s, a, d);
+    for (size_t i = 0; i < n; ++i) CHECK(near(moved[i] - base[i], {5, 0}));
+    // Weighted: offsets move with the blended bones.
+    bindMesh(sk, s, a, {1, 2});
+    Animation bent;
+    setRotateKey(bent, 1, 0, 90);  // upper bone now points left
+    sk.animations.push_back(bent);
+    Pose rotated = makeAnimatedPose(sk, &sk.animations[1], 0);
+    std::vector<Vec2> off(n, Vec2{10, 0});
+    std::vector<Vec2> r0 = computeVertices(sk, rotated, s, a), r1 = computeVertices(sk, rotated, s, a, &off);
+    Affine basis = deformBasis(rotated, s, a, 0);
+    CHECK(near(r1[0] - r0[0], basis.applyVector({10, 0})));
+    // Keys with the wrong vertex count are dropped; removing an attachment drops its keys.
+    sk.animations[0].slots[0].deform[0].push_back({2.0f, std::vector<Vec2>(n + 1), {}});
+    CHECK(sk.dropStaleDeformKeys(0, 0) == 1);
+    sk.removeAttachment(0, 0);
+    CHECK(sk.animations[0].slots.empty());
+    CHECK(sk.slots[0].activeAttachment == -1);
+}
+
+static void testWeightTools() {
+    Skeleton sk = makeMeshRig();
+    Slot& s = sk.slots[0];
+    convertRegionToMesh(s.attachments[0], sk.images[0], nullptr, 2, 4);
+    Attachment& a = s.attachments[0];
+    bindMesh(sk, s, a, {0, 1, 2});
+    auto total = [&](int v) {
+        float t = 0;
+        for (auto& w : a.weights[v]) t += w.weight;
+        return t;
+    };
+    // Locked bone keeps its weight.
+    int v = 7;
+    float lockedBefore = vertexWeight(a, v, 2);
+    setWeight(sk, s, a, v, 1, 0.9f, {2});
+    CHECK(near(vertexWeight(a, v, 2), lockedBefore));
+    CHECK(near(total(v), 1));
+    CHECK(vertexWeight(a, v, 1) <= 1 - lockedBefore + 1e-4f);
+    // Smoothing pulls a spike towards its neighbours.
+    setWeight(sk, s, a, v, 0, 1.0f);
+    float spike = vertexWeight(a, v, 0);
+    smoothWeights(sk, s, a, {v}, 1.0f);
+    CHECK(vertexWeight(a, v, 0) < spike);
+    CHECK(near(total(v), 1));
+    // Prune to one influence.
+    pruneWeights(a, 0.0f, 1);
+    for (size_t i = 0; i < a.weights.size(); ++i) CHECK(a.weights[i].size() == 1 && near(total((int)i), 1));
+    // Vertex positions survive all of the above in the setup pose.
+    Pose setup = makeSetupPose(sk);
+    std::vector<Vec2> world = computeVertices(sk, setup, s, a);
+    CHECK(near(world[0], computeVertices(sk, setup, s, a)[0]));
+}
+
+static void testClipping() {
+    Geometry sq;
+    sq.positions = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    sq.uvs = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    sq.triangles = {0, 1, 2, 0, 2, 3};
+    Geometry out;
+    // Half-plane triangle covering x < 5.
+    clipGeometry(sq, clipTrianglesOf({{-10, -10}, {5, -10}, {5, 30}, {-10, 30}}), out);
+    CHECK(near(trianglesArea(out.positions, out.triangles), 50));
+    for (size_t i = 0; i < out.positions.size(); ++i) CHECK(near(out.uvs[i].x, out.positions[i].x / 10));
+    // Concave L-shaped clip polygon.
+    clipGeometry(sq, clipTrianglesOf({{0, 0}, {0, 10}, {5, 10}, {5, 5}, {10, 5}, {10, 0}}), out);
+    CHECK(near(trianglesArea(out.positions, out.triangles), 75));
+    // Nothing overlaps.
+    clipGeometry(sq, clipTrianglesOf({{20, 20}, {30, 20}, {30, 30}}), out);
+    CHECK(out.triangles.empty());
+}
+
+static void testPhase2RoundTrip() {
+    Skeleton sk = makeMeshRig();
+    Slot& s = sk.slots[0];
+    std::vector<unsigned char> px = circleImage(40, 200, 20, 100, 18);
+    std::vector<Vec2> outline = traceAlphaOutline(px.data(), 40, 200, 8, 1, 2);
+    CHECK(buildMeshFromOutline(sk, s, s.attachments[0], sk.images[0], outline, 10));
+    Attachment clip;
+    clip.name = "clip";
+    clip.type = AttachmentType::Clipping;
+    makePolygon(clip, {{-10, 0}, {10, 0}, {0, 50}});
+    clip.endSlot = 0;
+    Attachment box;
+    box.name = "box";
+    box.type = AttachmentType::BoundingBox;
+    makePolygon(box, {{0, 0}, {5, 0}, {5, 5}, {0, 5}});
+    s.attachments.push_back(clip);
+    s.attachments.push_back(box);
+    Animation an;
+    an.name = "deform";
+    setDeformKey(an, 0, 0, 0.5f, std::vector<Vec2>(s.attachments[0].vertexCount(), Vec2{1, 2}));
+    setKeyCurve(an, 0, Channel::Deform, 0.5f, CurveShape::stepped(), 0);
+    sk.animations.push_back(an);
+    std::string text = toJson(sk);
+    Skeleton loaded;
+    std::string err;
+    CHECK(fromJson(text, loaded, &err));
+    CHECK(toJson(loaded) == text);
+    CHECK(loaded.slots[0].attachments[1].type == AttachmentType::Clipping && loaded.slots[0].attachments[1].hullLength == 3);
+    CHECK(loaded.slots[0].attachments[0].hullLength == s.attachments[0].hullLength);
+    CHECK(keyCurve(loaded.animations[0], 0, Channel::Deform, 0.5f, 0)->type == Curve::Stepped);
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -325,6 +553,12 @@ int main() {
     testSlotColorAndDrawOrder();
     testEvents();
     testVersion1Compat();
+    testTriangulate();
+    testOutlineAndMeshBuild();
+    testDeform();
+    testWeightTools();
+    testClipping();
+    testPhase2RoundTrip();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

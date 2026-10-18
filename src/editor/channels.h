@@ -14,6 +14,7 @@ inline const char* channelName(rig::Channel ch) {
     case rig::Channel::Color: return "颜色";
     case rig::Channel::DrawOrder: return "绘制顺序";
     case rig::Channel::Event: return "事件";
+    case rig::Channel::Deform: return "变形";
     }
     return "";
 }
@@ -28,6 +29,7 @@ inline ImU32 channelColor(rig::Channel ch) {
     case rig::Channel::Color: return theme::kColor;
     case rig::Channel::DrawOrder: return theme::kDrawOrder;
     case rig::Channel::Event: return theme::kEvent;
+    case rig::Channel::Deform: return theme::kDeform;
     }
     return theme::kMixed;
 }
@@ -42,6 +44,7 @@ inline Icon channelIcon(rig::Channel ch) {
     case rig::Channel::Color: return Icon::Color;
     case rig::Channel::DrawOrder: return Icon::DrawOrder;
     case rig::Channel::Event: return Icon::Event;
+    case rig::Channel::Deform: return Icon::Deform;
     }
     return Icon::Key;
 }

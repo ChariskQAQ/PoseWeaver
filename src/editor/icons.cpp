@@ -23,6 +23,9 @@ ImU32 iconColor(Icon icon) {
     case Icon::Event: return theme::kEvent;
     case Icon::Color: return theme::kColor;
     case Icon::Graph: return IM_COL32(110, 220, 120, 255);
+    case Icon::Clipping: return IM_COL32(200, 110, 255, 255);
+    case Icon::BoundingBox: return IM_COL32(110, 230, 120, 255);
+    case Icon::Deform: return theme::kDeform;
     case Icon::Slot: return IM_COL32(120, 200, 255, 255);
     case Icon::Region: return IM_COL32(120, 200, 140, 255);
     case Icon::Mesh: return IM_COL32(110, 200, 230, 255);
@@ -151,6 +154,34 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float size, ImU32 col) {
             pts[i] = P(c, s, x, 0.7f - 1.4f * (0.5f - 0.5f * std::cos(3.14159f * i / n)));
         }
         dl->AddPolyline(pts, n + 1, col, 0, t * 1.3f);
+        break;
+    }
+    case Icon::Clipping: {
+        ImVec2 pts[5] = {P(c, s, -0.8f, 0.6f), P(c, s, -0.5f, -0.8f), P(c, s, 0.6f, -0.6f), P(c, s, 0.85f, 0.4f), P(c, s, 0.0f, 0.85f)};
+        for (int i = 0; i < 5; ++i) {  // dashed outline
+            ImVec2 a = pts[i], b = pts[(i + 1) % 5];
+            dl->AddLine(a, ImVec2(a.x + (b.x - a.x) * 0.6f, a.y + (b.y - a.y) * 0.6f), col, t * 1.3f);
+        }
+        dl->AddCircleFilled(c, s * 0.2f, col);
+        break;
+    }
+    case Icon::BoundingBox:
+        dl->AddRect(P(c, s, -0.75f, -0.75f), P(c, s, 0.75f, 0.75f), col, 0, 0, t * 1.3f);
+        for (ImVec2 k : {P(c, s, -0.75f, -0.75f), P(c, s, 0.75f, -0.75f), P(c, s, 0.75f, 0.75f), P(c, s, -0.75f, 0.75f)})
+            dl->AddRectFilled(ImVec2(k.x - s * 0.15f, k.y - s * 0.15f), ImVec2(k.x + s * 0.15f, k.y + s * 0.15f), col);
+        break;
+    case Icon::Deform: {
+        const int n = 10;
+        ImVec2 top[n + 1], bottom[n + 1];
+        for (int i = 0; i <= n; ++i) {
+            float x = -0.8f + 1.6f * i / n, wave = 0.25f * std::sin(i * 0.9f);
+            top[i] = P(c, s, x, -0.5f + wave);
+            bottom[i] = P(c, s, x, 0.5f + wave);
+        }
+        dl->AddPolyline(top, n + 1, col, 0, t * 1.2f);
+        dl->AddPolyline(bottom, n + 1, col, 0, t * 1.2f);
+        dl->AddLine(top[0], bottom[0], col, t);
+        dl->AddLine(top[n], bottom[n], col, t);
         break;
     }
     case Icon::Local:

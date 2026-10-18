@@ -14,7 +14,23 @@ namespace rig {
 // Version history:
 //   1  bones, slots, region/mesh attachments, rotate/translate/scale + attachment keys
 //   2  shear, Bezier curves, slot colour keys, draw order keys, events
-static constexpr int kFormatVersion = 2;
+//   3  mesh hull, clipping / bounding box attachments, deform keys
+static constexpr int kFormatVersion = 3;
+
+static const char* typeName(AttachmentType t) {
+    switch (t) {
+    case AttachmentType::Mesh: return "mesh";
+    case AttachmentType::Clipping: return "clipping";
+    case AttachmentType::BoundingBox: return "boundingbox";
+    default: return "region";
+    }
+}
+static AttachmentType typeFrom(const std::string& s) {
+    if (s == "mesh") return AttachmentType::Mesh;
+    if (s == "clipping") return AttachmentType::Clipping;
+    if (s == "boundingbox") return AttachmentType::BoundingBox;
+    return AttachmentType::Region;
+}
 
 // Curves are written as "linear", "stepped" or [cx1, cy1, cx2, cy2] for Bezier.
 static json curveJson(const CurveShape& c) {
@@ -107,14 +123,16 @@ std::string toJson(const Skeleton& sk, int indent) {
         json js{{"name", s.name}, {"bone", s.bone}, {"active", s.activeAttachment}, {"color", colorJson(s.color)}};
         json atts = json::array();
         for (auto& a : s.attachments) {
-            json ja{{"name", a.name}, {"image", a.image}};
+            json ja{{"name", a.name}, {"image", a.image}, {"type", typeName(a.type)}};
             if (a.type == AttachmentType::Region) {
-                ja["type"] = "region";
                 ja["transform"] = transformJson(a.transform);
             } else {
-                ja["type"] = "mesh";
-                ja["uvs"] = vecList(a.uvs);
-                ja["triangles"] = a.triangles;
+                if (a.type == AttachmentType::Mesh) {
+                    ja["uvs"] = vecList(a.uvs);
+                    ja["triangles"] = a.triangles;
+                    if (a.hullLength > 0) ja["hull"] = a.hullLength;
+                }
+                if (a.type == AttachmentType::Clipping) ja["end"] = a.endSlot;
                 if (a.isWeighted()) {
                     json ws = json::array();
                     for (auto& list : a.weights) {
@@ -166,6 +184,15 @@ std::string toJson(const Skeleton& sk, int indent) {
             json keys = json::array();
             for (auto& k : tl.attachment) keys.push_back({{"time", k.time}, {"value", k.value}});
             json jt{{"slot", si}, {"attachment", keys}};
+            if (!tl.deform.empty()) {
+                json dj = json::array();
+                for (auto& [ai, dk] : tl.deform) {
+                    json keysJ = json::array();
+                    for (auto& k : dk) keysJ.push_back({{"time", k.time}, {"offsets", vecList(k.value)}, {"curve", curveJson(k.curve)}});
+                    dj.push_back({{"attachment", ai}, {"keys", keysJ}});
+                }
+                jt["deform"] = dj;
+            }
             if (!tl.color.empty()) {
                 json ck = json::array();
                 for (auto& k : tl.color) ck.push_back({{"time", k.time}, {"color", colorJson(k.value)}, {"curve", curveJson(k.curve)}});
@@ -207,10 +234,11 @@ static bool validate(const Skeleton& sk, std::string* error) {
         if (s.activeAttachment >= (int)s.attachments.size()) return fail("slot " + s.name + ": invalid active attachment");
         for (auto& a : s.attachments) {
             if (a.image < -1 || a.image >= ni) return fail("attachment " + a.name + ": invalid image");
-            if (a.type != AttachmentType::Mesh) continue;
-            size_t nv = a.uvs.size();
-            if (a.isWeighted() ? a.weights.size() != nv : a.vertices.size() != nv)
-                return fail("mesh " + a.name + ": vertex count mismatch");
+            if (a.type == AttachmentType::Region) continue;
+            size_t nv = a.vertexCount();
+            if (a.type == AttachmentType::Mesh && a.uvs.size() != nv) return fail("mesh " + a.name + ": vertex count mismatch");
+            if (a.hullLength < 0 || a.hullLength > (int)nv) return fail("mesh " + a.name + ": invalid hull");
+            if (a.endSlot < -1 || a.endSlot >= ns) return fail("clipping " + a.name + ": invalid end slot");
             for (int t : a.triangles)
                 if (t < 0 || t >= (int)nv) return fail("mesh " + a.name + ": invalid triangle index");
             for (auto& list : a.weights)
@@ -221,8 +249,15 @@ static bool validate(const Skeleton& sk, std::string* error) {
     for (auto& an : sk.animations) {
         for (auto& [bi, tl] : an.bones)
             if (bi < 0 || bi >= nb) return fail("animation " + an.name + ": invalid bone");
-        for (auto& [si, tl] : an.slots)
+        for (auto& [si, tl] : an.slots) {
             if (si < 0 || si >= ns) return fail("animation " + an.name + ": invalid slot");
+            for (auto& [ai, keys] : tl.deform) {
+                if (ai < 0 || ai >= (int)sk.slots[si].attachments.size()) return fail("animation " + an.name + ": invalid deform attachment");
+                size_t nv = sk.slots[si].attachments[ai].vertexCount();
+                for (auto& k : keys)
+                    if (k.value.size() != nv) return fail("animation " + an.name + ": deform key vertex count mismatch");
+            }
+        }
         for (auto& k : an.drawOrder) {
             std::vector<bool> seen(ns, false);
             if ((int)k.order.size() != ns) return fail("animation " + an.name + ": draw order key has wrong size");
@@ -274,10 +309,14 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                 Attachment a;
                 a.name = ja.at("name").get<std::string>();
                 a.image = ja.value("image", -1);
-                if (ja.value("type", std::string("region")) == "mesh") {
-                    a.type = AttachmentType::Mesh;
-                    a.uvs = vecListFrom(ja.at("uvs"));
-                    a.triangles = ja.at("triangles").get<std::vector<int>>();
+                a.type = typeFrom(ja.value("type", std::string("region")));
+                if (a.type != AttachmentType::Region) {
+                    if (a.type == AttachmentType::Mesh) {
+                        a.uvs = vecListFrom(ja.at("uvs"));
+                        a.triangles = ja.at("triangles").get<std::vector<int>>();
+                        a.hullLength = ja.value("hull", 0);
+                    }
+                    a.endSlot = ja.value("end", -1);
                     if (ja.contains("weights")) {
                         for (auto& jl : ja["weights"]) {
                             std::vector<VertexWeight> list;
@@ -293,8 +332,8 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                     } else {
                         a.vertices = vecListFrom(ja.at("vertices"));
                     }
+                    if (a.isPolygon()) a.hullLength = (int)a.vertexCount();
                 } else {
-                    a.type = AttachmentType::Region;
                     if (ja.contains("transform")) a.transform = transformFrom(ja["transform"]);
                 }
                 s.attachments.push_back(a);
@@ -331,6 +370,11 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                 for (auto& k : jt.at("attachment")) tl.attachment.push_back({k.at("time").get<float>(), k.at("value").get<int>()});
                 if (jt.contains("color"))
                     for (auto& k : jt["color"]) tl.color.push_back({k.at("time").get<float>(), colorFrom(k.at("color")), curveFrom(k)});
+                if (jt.contains("deform"))
+                    for (auto& dj : jt["deform"]) {
+                        std::vector<DeformKey>& keys = tl.deform[dj.at("attachment").get<int>()];
+                        for (auto& k : dj.at("keys")) keys.push_back({k.at("time").get<float>(), vecListFrom(k.at("offsets")), curveFrom(k)});
+                    }
                 an.slots[jt.at("slot").get<int>()] = tl;
             }
             if (ja.contains("drawOrder"))

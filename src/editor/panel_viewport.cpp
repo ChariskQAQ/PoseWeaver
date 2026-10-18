@@ -1,5 +1,6 @@
 #include "editor/editor.h"
 
+#include "core/clipping.h"
 #include "core/mesh_tools.h"
 #include "editor/theme.h"
 
@@ -62,6 +63,22 @@ int Editor::pickBone(ImVec2 screen) const {
     return best;
 }
 
+int Editor::attachmentIndex(int slot, const Attachment* att) const {
+    if (!att || slot < 0 || slot >= (int)sk_.slots.size()) return -1;
+    const auto& list = sk_.slots[slot].attachments;
+    if (list.empty() || att < &list.front() || att > &list.back()) return -1;
+    return (int)(att - &list.front());
+}
+
+const std::vector<Vec2>* Editor::poseDeform(int slot, const Attachment* att) const {
+    if (mode_ != Mode::Animate) return nullptr;
+    return findDeform(pose_, slot, attachmentIndex(slot, att));
+}
+
+std::vector<Vec2> Editor::attachmentVertices(int slot, const Attachment& att) const {
+    return computeVertices(sk_, pose_, sk_.slots[slot], att, poseDeform(slot, &att));
+}
+
 int Editor::pickSlot(Vec2 world) const {
     if (!view_.imagesVisible || !view_.imagesSelectable) return -1;
     for (int i = (int)pose_.drawOrder.size() - 1; i >= 0; --i) {
@@ -71,8 +88,12 @@ int Editor::pickSlot(Vec2 world) const {
         int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
         if (a < 0 || a >= (int)slot.attachments.size()) continue;
         const Attachment& att = slot.attachments[a];
+        if (att.isPolygon()) {
+            if (view_.polygonsVisible && pointInPolygon(world, attachmentVertices(s, att))) return s;
+            continue;
+        }
         Geometry g;
-        computeGeometry(sk_, pose_, slot, att, g);
+        computeGeometry(sk_, pose_, slot, att, g, poseDeform(s, &att));
         for (size_t t = 0; t + 2 < g.triangles.size(); t += 3) {
             int i0 = g.triangles[t], i1 = g.triangles[t + 1], i2 = g.triangles[t + 2];
             float u, v, w;
@@ -88,9 +109,10 @@ int Editor::pickSlot(Vec2 world) const {
 int Editor::pickVertex(ImVec2 screen) const {
     if (sel_.slot < 0) return -1;
     const Slot& slot = sk_.slots[sel_.slot];
+    (void)slot;
     const Attachment* att = const_cast<Editor*>(this)->selectedAttachment();
-    if (!att || att->type != AttachmentType::Mesh) return -1;
-    std::vector<Vec2> verts = computeVertices(sk_, pose_, slot, *att);
+    if (!att || !att->hasVertices()) return -1;
+    std::vector<Vec2> verts = attachmentVertices(sel_.slot, *att);
     int best = -1;
     float bestD = 8.0f * uiScale_;
     for (size_t i = 0; i < verts.size(); ++i) {
@@ -185,6 +207,10 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
         drag_.parentBone = sel_.bone;
         return;
     case Tool::MeshEdit: {
+        if (ImGui::GetIO().KeyAlt && mode_ == Mode::Setup) {
+            meshAddVertexAt(mouse);
+            return;
+        }
         int v = pickVertex(mouse);
         if (v >= 0) {
             auto it = std::find(sel_.vertices.begin(), sel_.vertices.end(), v);
@@ -195,14 +221,26 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
                 sel_.vertices = {v};
             }
             drag_.kind = Drag::Vertices;
-            drag_.startVertices = computeVertices(sk_, pose_, sk_.slots[sel_.slot], *selectedAttachment());
+            Attachment* att = selectedAttachment();
+            drag_.startVertices = attachmentVertices(sel_.slot, *att);
+            if (mode_ == Mode::Animate) {
+                // Deform: remember the current offsets and how offsets map to world space.
+                const std::vector<Vec2>* d = poseDeform(sel_.slot, att);
+                drag_.startOffsets = d ? *d : std::vector<Vec2>(att->vertexCount(), Vec2{});
+                drag_.deformBases.clear();
+                for (int i = 0; i < (int)att->vertexCount(); ++i)
+                    drag_.deformBases.push_back(deformBasis(pose_, sk_.slots[sel_.slot], *att, i).inverse());
+            } else if (att->type == AttachmentType::Mesh && att->image >= 0 && att->image < (int)sk_.images.size()) {
+                drag_.imageMap = imageToLocal(sk_, sk_.slots[sel_.slot], *att, sk_.images[att->image]);
+            }
             return;
         }
         int s = pickSlot(drag_.startWorld);
         if (s >= 0 && s != sel_.slot) {
-            selectAttachment(s, sk_.slots[s].activeAttachment);
+            int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : sk_.slots[s].activeAttachment;
+            selectAttachment(s, a);
             Attachment* att = selectedAttachment();
-            if (!att || att->type != AttachmentType::Mesh) setStatus("所选附件不是网格：在属性面板点“转为网格”");
+            if (!att || !att->hasVertices()) setStatus("所选附件不是网格：在属性面板点“自动生成网格”");
             return;
         }
         if (!shift) sel_.vertices.clear();
@@ -320,12 +358,28 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
     }
     case Drag::Vertices: {
         Attachment* att = selectedAttachment();
-        if (!att || mode_ != Mode::Setup) break;
+        if (!att) break;
         ensureCheckpoint();
+        if (mode_ == Mode::Animate) {
+            // Deform key: offsets in each vertex's own deform space.
+            std::vector<Vec2> offsets = drag_.startOffsets;
+            for (int v : sel_.vertices)
+                if (v < (int)offsets.size() && v < (int)drag_.deformBases.size())
+                    offsets[v] = drag_.startOffsets[v] + drag_.deformBases[v].applyVector(worldDelta);
+            if (!currentAnimation()) createAnimation();
+            setDeformKey(*currentAnimation(), sel_.slot, attachmentIndex(sel_.slot, att), time_, offsets);
+            break;
+        }
         Pose setup = makeSetupPose(sk_);
-        for (int v : sel_.vertices)
-            if (v < (int)drag_.startVertices.size())
-                setVertexSetupWorld(sk_, setup, sk_.slots[sel_.slot], *att, v, drag_.startVertices[v] + worldDelta);
+        const Slot& slot = sk_.slots[sel_.slot];
+        Affine toLocal = setup.world[slot.bone].inverse();
+        bool uvFollows = !meshDeformMode_ && att->type == AttachmentType::Mesh && att->image >= 0 && att->image < (int)sk_.images.size();
+        for (int v : sel_.vertices) {
+            if (v >= (int)drag_.startVertices.size()) continue;
+            Vec2 target = drag_.startVertices[v] + worldDelta;
+            setVertexSetupWorld(sk_, setup, slot, *att, v, target);
+            if (uvFollows) setVertexUV(*att, v, toLocal.apply(target), drag_.imageMap, sk_.images[att->image]);
+        }
         break;
     }
     case Drag::Paint: {
@@ -333,13 +387,13 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         if (!att || !att->isWeighted()) break;
         ensureCheckpoint();
         const Slot& slot = sk_.slots[sel_.slot];
-        std::vector<Vec2> verts = computeVertices(sk_, pose_, slot, *att);
+        std::vector<Vec2> verts = attachmentVertices(sel_.slot, *att);
         float r = brushRadius_ * uiScale_;
         for (size_t v = 0; v < verts.size(); ++v) {
             float d = dist(mouse, toScreen(verts[v]));
             if (d > r) continue;
             float amount = brushStrength_ * (1.0f - d / r) * dt * 2.0f;
-            paintWeight(sk_, slot, *att, (int)v, sel_.bone, ctrl ? -amount : amount);
+            paintWeight(sk_, slot, *att, (int)v, sel_.bone, ctrl ? -amount : amount, lockedBones_);
         }
         break;
     }
@@ -368,10 +422,10 @@ void Editor::viewportMouseUp(ImVec2 mouse, bool shift) {
     }
     case Drag::BoxSelect: {
         Attachment* att = selectedAttachment();
-        if (!att || att->type != AttachmentType::Mesh) break;
+        if (!att || !att->hasVertices()) break;
         ImVec2 lo{std::min(mouse.x, drag_.startScreen.x), std::min(mouse.y, drag_.startScreen.y)};
         ImVec2 hi{std::max(mouse.x, drag_.startScreen.x), std::max(mouse.y, drag_.startScreen.y)};
-        std::vector<Vec2> verts = computeVertices(sk_, pose_, sk_.slots[sel_.slot], *att);
+        std::vector<Vec2> verts = attachmentVertices(sel_.slot, *att);
         if (!shift) sel_.vertices.clear();
         for (size_t v = 0; v < verts.size(); ++v) {
             ImVec2 p = toScreen(verts[v]);
@@ -391,14 +445,48 @@ void Editor::viewportMouseUp(ImVec2 mouse, bool shift) {
 
 void Editor::drawSlots(ImDrawList* dl) {
     if (!view_.imagesVisible) return;
-    Geometry g;
+    Geometry g, clipped;
+    ClipTriangles clip;
+    int clipEnd = -2;  // -2: no clipping active
     for (int s : pose_.drawOrder) {
+        bool endsHere = clipEnd != -2 && s == clipEnd;
+        struct ClipReset {  // stop clipping after the end slot, however this iteration exits
+            bool on;
+            int& end;
+            ClipTriangles& c;
+            ~ClipReset() {
+                if (on) {
+                    end = -2;
+                    c.clear();
+                }
+            }
+        } reset{endsHere, clipEnd, clip};
         if (hiddenSlots_.count(s)) continue;
         const Slot& slot = sk_.slots[s];
         int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
         if (a < 0 || a >= (int)slot.attachments.size()) continue;
         const Attachment& att = slot.attachments[a];
-        computeGeometry(sk_, pose_, slot, att, g);
+        if (att.isPolygon()) {
+            std::vector<Vec2> poly = attachmentVertices(s, att);
+            if (att.type == AttachmentType::Clipping) {
+                clip = clipTrianglesOf(poly);
+                clipEnd = att.endSlot;
+            }
+            if (view_.polygonsVisible && poly.size() >= 2) {
+                bool selected = s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
+                std::vector<ImVec2> sp;
+                for (Vec2 p : poly) sp.push_back(toScreen(p));
+                ImU32 col = att.type == AttachmentType::Clipping ? IM_COL32(200, 110, 255, 220) : IM_COL32(110, 230, 120, 220);
+                dl->AddPolyline(sp.data(), (int)sp.size(), selected ? theme::kSelect : col, ImDrawFlags_Closed,
+                                (selected ? 2.0f : 1.4f) * uiScale_);
+            }
+            continue;
+        }
+        computeGeometry(sk_, pose_, slot, att, g, poseDeform(s, &att));
+        if (!clip.empty()) {
+            clipGeometry(g, clip, clipped);
+            std::swap(g, clipped);
+        }
         bool hasTex = att.image >= 0 && att.image < (int)textures_.size() && textures_[att.image].id;
         if (hasTex && !g.triangles.empty()) {
             const Color& c = s < (int)pose_.slotColor.size() ? pose_.slotColor[s] : slot.color;
@@ -412,7 +500,7 @@ void Editor::drawSlots(ImDrawList* dl) {
             dl->PopTextureID();
         }
         bool selected = s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
-        if ((!hasTex || selected) && att.type == AttachmentType::Region) {
+        if ((!hasTex || selected) && att.type == AttachmentType::Region && g.positions.size() == 4) {
             ImVec2 p[4];
             for (int i = 0; i < 4; ++i) p[i] = toScreen(g.positions[i]);
             dl->AddPolyline(p, 4, selected ? theme::kSelect : IM_COL32(200, 200, 200, 120), ImDrawFlags_Closed,
@@ -424,11 +512,10 @@ void Editor::drawSlots(ImDrawList* dl) {
 void Editor::drawMeshOverlay(ImDrawList* dl) {
     if (sel_.slot < 0) return;
     Attachment* att = selectedAttachment();
-    if (!att || att->type != AttachmentType::Mesh) return;
+    if (!att || !att->hasVertices()) return;
     bool editing = tool_ == Tool::MeshEdit || tool_ == Tool::Weights;
     if (!editing && !view_.meshVisible) return;
-    const Slot& slot = sk_.slots[sel_.slot];
-    std::vector<Vec2> verts = computeVertices(sk_, pose_, slot, *att);
+    std::vector<Vec2> verts = attachmentVertices(sel_.slot, *att);
     std::vector<ImVec2> sp(verts.size());
     for (size_t i = 0; i < verts.size(); ++i) sp[i] = toScreen(verts[i]);
 
@@ -446,6 +533,13 @@ void Editor::drawMeshOverlay(ImDrawList* dl) {
         ImVec2 p[3] = {sp[att->triangles[t]], sp[att->triangles[t + 1]], sp[att->triangles[t + 2]]};
         dl->AddPolyline(p, 3, lineCol, ImDrawFlags_Closed, 1.0f);
     }
+    // Outline (hull / polygon) drawn thicker.
+    int hull = att->isPolygon() ? (int)sp.size() : att->hullLength;
+    if (hull >= 2 && hull <= (int)sp.size())
+        dl->AddPolyline(sp.data(), hull, editing ? IM_COL32(255, 255, 255, 210) : IM_COL32(255, 255, 255, 90), ImDrawFlags_Closed,
+                        1.8f * uiScale_);
+    if (editing && tool_ == Tool::MeshEdit && mode_ == Mode::Setup && ImGui::GetIO().KeyAlt)
+        dl->AddText(ImGui::GetIO().MousePos + ImVec2(14, 4), IM_COL32(255, 255, 255, 220), "+ 顶点");
     if (!editing) return;
     for (size_t v = 0; v < sp.size(); ++v) {
         bool sel = std::find(sel_.vertices.begin(), sel_.vertices.end(), (int)v) != sel_.vertices.end();

@@ -14,7 +14,7 @@ using namespace rig;
 
 namespace {
 constexpr Channel kBoneChannels[] = {Channel::Rotate, Channel::Translate, Channel::Scale, Channel::Shear};
-constexpr Channel kSlotChannels[] = {Channel::Attachment, Channel::Color};
+constexpr Channel kSlotChannels[] = {Channel::Attachment, Channel::Color, Channel::Deform};
 
 struct KeyMark {
     float time;
@@ -43,19 +43,22 @@ void addBone(std::vector<KeyMark>& out, const BoneTimeline& tl, Channel only = C
     if (all || only == Channel::Shear) addKeys(out, tl.shear, Channel::Shear);
 }
 
-void addSlot(std::vector<KeyMark>& out, const SlotTimeline& tl, Channel only = Channel::Event) {
+void addSlot(std::vector<KeyMark>& out, const SlotTimeline& tl, Channel only = Channel::Event, int sub = -1) {
     bool all = only == Channel::Event;
     if (all || only == Channel::Attachment) addKeys(out, tl.attachment, Channel::Attachment);
     if (all || only == Channel::Color) addKeys(out, tl.color, Channel::Color);
+    if (all || only == Channel::Deform)
+        for (auto& [a, keys] : tl.deform)
+            if (sub < 0 || a == sub) addKeys(out, keys, Channel::Deform);
 }
 
 ImU32 maskColor(unsigned mask) {
-    for (int c = 0; c <= (int)Channel::Event; ++c)
+    for (int c = 0; c <= (int)Channel::Deform; ++c)
         if (mask == channelBit((Channel)c)) return channelColor((Channel)c);
     return theme::kMixed;
 }
 
-bool channelHasCurve(Channel ch) { return isBoneChannel(ch) || ch == Channel::Color; }
+bool channelHasCurve(Channel ch) { return isBoneChannel(ch) || ch == Channel::Color || ch == Channel::Deform; }
 
 void dashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
     float len = b.x - a.x;
@@ -64,6 +67,12 @@ void dashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
 
 bool sameValue(float a, float b) { return std::fabs(a - b) < 1e-4f; }
 bool sameValue(Vec2 a, Vec2 b) { return length(a - b) < 1e-4f; }
+bool sameValue(const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (length(a[i] - b[i]) > 1e-4f) return false;
+    return true;
+}
 bool sameValue(const Color& a, const Color& b) {
     for (int i = 0; i < 4; ++i)
         if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
@@ -218,6 +227,8 @@ void Editor::drawDopesheet() {
         rows.push_back({SheetRow::Slot, s});
         if (!tl.attachment.empty()) rows.push_back({SheetRow::Property, s, Channel::Attachment});
         if (!tl.color.empty()) rows.push_back({SheetRow::Property, s, Channel::Color});
+        for (auto& [a, keys] : tl.deform)
+            if (!keys.empty()) rows.push_back({SheetRow::Property, s, Channel::Deform, a});
     }
     if (!an->drawOrder.empty()) rows.push_back({SheetRow::Property, -1, Channel::DrawOrder});
     if (!an->events.empty()) rows.push_back({SheetRow::Property, -1, Channel::Event});
@@ -248,7 +259,7 @@ void Editor::drawDopesheet() {
                 addKeys(m, an->events, Channel::Event);
             } else if (isSlotChannel(r.channel)) {
                 auto it = an->slots.find(r.index);
-                if (it != an->slots.end()) addSlot(m, it->second, r.channel);
+                if (it != an->slots.end()) addSlot(m, it->second, r.channel, r.sub);
             } else {
                 auto it = an->bones.find(r.index);
                 if (it != an->bones.end()) addBone(m, it->second, r.channel);
@@ -259,25 +270,30 @@ void Editor::drawDopesheet() {
         return m;
     };
     // Bone / slot / channel triples a row's keys belong to (for delete and curve commands).
+    struct Target {
+        int index;
+        Channel channel;
+        int sub;
+    };
     auto rowChannels = [&](const SheetRow& r) {
-        std::vector<std::pair<int, Channel>> out;
+        std::vector<Target> out;
         switch (r.kind) {
         case SheetRow::Overview:
             for (auto& [b, tl] : an->bones)
-                for (Channel ch : kBoneChannels) out.push_back({b, ch});
+                for (Channel ch : kBoneChannels) out.push_back({b, ch, -1});
             for (auto& [s, tl] : an->slots)
-                for (Channel ch : kSlotChannels) out.push_back({s, ch});
-            out.push_back({-1, Channel::DrawOrder});
-            out.push_back({-1, Channel::Event});
+                for (Channel ch : kSlotChannels) out.push_back({s, ch, -1});
+            out.push_back({-1, Channel::DrawOrder, -1});
+            out.push_back({-1, Channel::Event, -1});
             break;
         case SheetRow::Bone:
-            for (Channel ch : kBoneChannels) out.push_back({r.index, ch});
+            for (Channel ch : kBoneChannels) out.push_back({r.index, ch, -1});
             break;
         case SheetRow::Slot:
-            for (Channel ch : kSlotChannels) out.push_back({r.index, ch});
+            for (Channel ch : kSlotChannels) out.push_back({r.index, ch, -1});
             break;
         case SheetRow::Property:
-            out.push_back({r.index, r.channel});
+            out.push_back({r.index, r.channel, r.sub});
             break;
         }
         return out;
@@ -378,6 +394,9 @@ void Editor::drawDopesheet() {
                 selectBone(r.index);
                 setTool(r.channel == Channel::Rotate ? Tool::Rotate : r.channel == Channel::Translate ? Tool::Translate
                         : r.channel == Channel::Scale ? Tool::Scale : Tool::Shear);
+            } else if (r.kind == SheetRow::Property && r.channel == Channel::Deform) {
+                selectAttachment(r.index, r.sub);
+                setTool(Tool::MeshEdit);
             } else if (r.kind == SheetRow::Slot || (r.kind == SheetRow::Property && isSlotChannel(r.channel))) {
                 selectSlot(r.index);
             } else if (r.kind == SheetRow::Overview) {
@@ -427,7 +446,7 @@ void Editor::drawDopesheet() {
                 if (r.kind == SheetRow::Overview) moveKeys(*an, sheetDrag_.from, t);
                 else if (r.kind == SheetRow::Bone) moveRowKeys(*an, false, r.index, sheetDrag_.from, t);
                 else if (r.kind == SheetRow::Slot) moveRowKeys(*an, true, r.index, sheetDrag_.from, t);
-                else moveChannelKey(*an, r.index, r.channel, sheetDrag_.from, t);
+                else moveChannelKey(*an, r.index, r.channel, sheetDrag_.from, t, r.sub);
                 sheetDrag_.from = t;
                 setTime(t);
             }
@@ -440,19 +459,19 @@ void Editor::drawDopesheet() {
         auto targets = rowChannels(sheetMenuRow_);
         if (ImGui::MenuItem("删除关键帧")) {
             checkpoint();
-            for (auto& [index, ch] : targets)
-                while (removeKey(*an, index, ch, sheetMenuTime_)) {
-                    if (ch != Channel::Event) break;  // several events can share a time
+            for (auto& tg : targets)
+                while (removeKey(*an, tg.index, tg.channel, sheetMenuTime_, tg.sub)) {
+                    if (tg.channel != Channel::Event) break;  // several events can share a time
                 }
         }
         bool curves = false;
-        for (auto& [index, ch] : targets) curves |= channelHasCurve(ch);
+        for (auto& tg : targets) curves |= channelHasCurve(tg.channel);
         if (curves) {
             ImGui::Separator();
             auto setCurve = [&](const CurveShape& c) {
                 checkpoint();
-                for (auto& [index, ch] : targets)
-                    if (channelHasCurve(ch)) setKeyCurve(*an, index, ch, sheetMenuTime_, c);
+                for (auto& tg : targets)
+                    if (channelHasCurve(tg.channel)) setKeyCurve(*an, tg.index, tg.channel, sheetMenuTime_, c, tg.sub);
             };
             if (ImGui::MenuItem("曲线: 线性")) setCurve(CurveShape::linear());
             if (ImGui::MenuItem("曲线: 阶梯")) setCurve(CurveShape::stepped());
@@ -498,7 +517,10 @@ void Editor::drawDopesheet() {
             float indent = r.index >= 0 ? ih * 1.2f : 0;
             Icon ic = channelIcon(r.channel);
             drawIcon(rdl, ic, ImVec2(tx + indent + ih * 0.5f, ty + ih * 0.5f), ih * 0.75f, channelColor(r.channel));
-            rdl->AddText(ImVec2(tx + indent + ih * 1.3f, ty), textCol, channelName(r.channel));
+            std::string name = channelName(r.channel);
+            if (r.channel == Channel::Deform && r.index >= 0 && r.sub >= 0 && r.sub < (int)sk_.slots[r.index].attachments.size())
+                name += " " + sk_.slots[r.index].attachments[r.sub].name;
+            rdl->AddText(ImVec2(tx + indent + ih * 1.3f, ty), textCol, name.c_str());
         }
 
         // Interpolation lines: solid = linear, curved = Bezier, dashed = stepped, none = equal values.
@@ -525,9 +547,12 @@ void Editor::drawDopesheet() {
                     }
                 }
             };
-            if (r.channel == Channel::Color) {
+            if (r.channel == Channel::Color || r.channel == Channel::Deform) {
                 auto it = an->slots.find(r.index);
-                if (it != an->slots.end()) draw(it->second.color);
+                if (it != an->slots.end()) {
+                    if (r.channel == Channel::Color) draw(it->second.color);
+                    else if (it->second.deform.count(r.sub)) draw(it->second.deform.at(r.sub));
+                }
             } else {
                 auto it = an->bones.find(r.index);
                 if (it != an->bones.end()) {

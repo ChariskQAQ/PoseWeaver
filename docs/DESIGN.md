@@ -33,14 +33,15 @@ Skeleton
                  计算世界矩阵时用 Skeleton::updateOrder() 保证父骨骼先于子骨骼
   slots[]      : name, bone, attachments[], activeAttachment(-1 为空)   ← 数组顺序 = 绘制顺序
   attachment   : Region { image, x,y,rotation,scaleX,scaleY }
-                 Mesh   { image, uvs[], triangles[],
+                 Mesh   { image, uvs[], triangles[], hullLength（前 N 个顶点按顺序构成外轮廓）,
                           vertices[] (未绑定: 相对 slot 骨骼的坐标),
                           weights[][] (已绑定: 每顶点若干 {bone, 骨骼局部坐标, weight}) }
+                 Clipping / BoundingBox { vertices[] 或 weights[][]（多边形）, Clipping 另有 endSlot }
   images[]     : 相对工程文件的路径
   events[]     : name, int, float, string, audio（事件定义，关键帧可覆盖数值）
   animations[] : name, duration,
                  boneTimelines[bone] { rotate/translate/scale/shear 关键帧 }
-                 slotTimelines[slot] { attachment / color 关键帧 }
+                 slotTimelines[slot] { attachment / color 关键帧, deform[附件] { 每顶点偏移 } }
                  drawOrder[] { time, 插槽排列 }   events[] { time, event, 覆盖值 }
                  曲线: linear | stepped | bezier(cx1,cy1,cx2,cy2)，作用于该帧到下一帧
 ```
@@ -51,6 +52,9 @@ Skeleton
 - 旋转、斜切用角度制。局部矩阵的 X 轴方向 = rotation + shearX，Y 轴方向 = rotation + 90 + shearY，长度分别为 scaleX、scaleY；世界矩阵 = 父世界矩阵 × 局部矩阵。
 - 动画值是相对 setup 的增量：旋转/位移/斜切为相加，缩放为相乘；插槽颜色为绝对值。
 - 已绑定网格的顶点位置 = Σ wᵢ · Boneᵢ.world × localᵢ，localᵢ 在绑定时由 setup 姿态求逆得到。
+- 变形偏移：未绑定顶点加在 slot 骨骼空间；已绑定顶点加到每个 localᵢ 上（随骨骼一起转动）。
+- 剪裁：剪裁多边形先三角化成凸块，后续插槽的三角形对每个凸块做 Sutherland–Hodgman 裁剪，直到 endSlot。
+- 网格三角化：外轮廓耳切 → 插入内部点 → Lawson 翻边（不翻轮廓边），得到约束 Delaunay 三角网。
 
 ## 撤销
 

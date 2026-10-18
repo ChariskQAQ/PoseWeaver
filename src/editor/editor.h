@@ -32,6 +32,9 @@ struct Drag {
     rig::Transform startTransform;  // bone local or attachment transform at drag start
     rig::Affine parentWorld;        // space the dragged transform lives in
     std::vector<rig::Vec2> startVertices;
+    std::vector<rig::Vec2> startOffsets;  // deform drag: offsets at drag start
+    std::vector<rig::Affine> deformBases; // deform drag: offset -> world per vertex
+    rig::Affine imageMap;                 // mesh edit drag: image pixels -> slot-bone space
     Tool tool = Tool::Rotate;       // tool that started the drag
     int parentBone = -1;            // CreateBone
     bool moved = false;             // passed the drag threshold
@@ -59,8 +62,8 @@ public:
     void setUiScale(float s) { uiScale_ = s; }
     bool openProject(const std::string& path);
     // Builds a two-bone skinned arm with a "wave" animation from `imagePath`.
-    // weightsView = stay in Setup mode with the weights tool showing the lower bone.
-    void buildDemo(const std::string& imagePath, float time, bool weightsView);
+    // scenario: "" (Animate at `time`), "weights", "mesh" (mesh tool), "clip" (adds a clipping slot).
+    void buildDemo(const std::string& imagePath, float time, const std::string& scenario);
     // Brings the Graph tab to front with the first rotate key of the selected bone selected.
     void focusGraph() {
         focusGraph_ = 3;
@@ -109,6 +112,7 @@ private:
         bool bonesVisible = true, bonesSelectable = true, boneNames = false;
         bool imagesVisible = true, imagesSelectable = true;
         bool meshVisible = true;
+        bool polygonsVisible = true;  // clipping and bounding box outlines
     } view_;
     std::set<int> hiddenBones_, hiddenSlots_;  // editor-only visibility
     Drag drag_;
@@ -127,6 +131,7 @@ private:
         enum Kind { Overview, Bone, Slot, Property } kind;
         int index;                                  // bone or slot (-1 for draw order / events)
         rig::Channel channel = rig::Channel::Rotate;  // Property rows
+        int sub = -1;                                 // Deform rows: attachment index
     };
     struct SheetDrag {
         bool scrubbing = false;
@@ -153,6 +158,12 @@ private:
     } graphDrag_;
 
     // --- mesh / weights tools ---
+    bool meshDeformMode_ = false;  // Setup mesh editing: move vertices without changing uvs
+    float outlineTolerance_ = 2.0f, outlinePadding_ = 2.0f;
+    int meshDensity_ = 6;          // interior points across the image's longer side (0 = none)
+    std::vector<int> lockedBones_;
+    float smoothAmount_ = 0.5f, pruneThreshold_ = 0.05f, setWeightValue_ = 1.0f;
+    int pruneMax_ = 4;
     int gridCols_ = 6, gridRows_ = 6;
     float brushRadius_ = 40, brushStrength_ = 0.5f;
     std::vector<int> bindBones_;  // bones checked in the bind list
@@ -202,6 +213,16 @@ private:
     void drawMeshOverlay(ImDrawList* dl);
     void frameAll();
     void zoomTo(float zoom);
+    // Deform offsets of an attachment in the displayed pose (Animate mode), or null.
+    const std::vector<rig::Vec2>* poseDeform(int slot, const rig::Attachment* att) const;
+    std::vector<rig::Vec2> attachmentVertices(int slot, const rig::Attachment& att) const;  // displayed pose, world
+    int attachmentIndex(int slot, const rig::Attachment* att) const;
+    // Mesh / polygon editing (Setup mode).
+    void meshAddVertexAt(ImVec2 mouse);
+    void meshDeleteSelectedVertices();
+    bool autoMesh(int slot, int attachment);
+    void createPolygonAttachment(int slot, rig::AttachmentType type);
+    void afterTopologyChange(int slot, int attachment);
     void setTool(Tool t);
 
     // properties sections

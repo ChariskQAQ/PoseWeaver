@@ -4,7 +4,13 @@
 
 namespace rig {
 
+const std::vector<Vec2>* findDeform(const Pose& pose, int slot, int attachment) {
+    auto it = pose.deform.find({slot, attachment});
+    return it == pose.deform.end() ? nullptr : &it->second;
+}
+
 void resetToSetup(const Skeleton& sk, Pose& pose) {
+    pose.deform.clear();
     pose.local.resize(sk.bones.size());
     pose.world.assign(sk.bones.size(), Affine{});
     for (size_t i = 0; i < sk.bones.size(); ++i) pose.local[i] = sk.bones[i].setup;
@@ -70,6 +76,21 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
         int a = sample(tl.attachment, time, sk.slots[si].activeAttachment);
         pose.slotAttachment[si] = a < (int)sk.slots[si].attachments.size() ? a : -1;
         pose.slotColor[si] = sample(tl.color, time, sk.slots[si].color);
+        for (auto& [ai, keys] : tl.deform) {
+            if (keys.empty() || ai < 0 || ai >= (int)sk.slots[si].attachments.size()) continue;
+            size_t n = sk.slots[si].attachments[ai].vertexCount();
+            int i = keyBefore(keys, time);
+            const DeformKey& k0 = keys[std::max(i, 0)];
+            if (k0.value.size() != n) continue;
+            std::vector<Vec2> offsets = k0.value;
+            if (i >= 0 && i + 1 < (int)keys.size() && keys[i + 1].value.size() == n) {
+                const DeformKey& k1 = keys[i + 1];
+                float span = k1.time - k0.time;
+                float f = applyCurve(k0.curve, span > 1e-8f ? (time - k0.time) / span : 0.0f);
+                for (size_t v = 0; v < n; ++v) offsets[v] = k0.value[v] + (k1.value[v] - k0.value[v]) * f;
+            }
+            pose.deform[{si, ai}] = std::move(offsets);
+        }
     }
     // Draw order is stepped: the last key at or before `time` wins (before the first key: setup).
     const DrawOrderKey* order = nullptr;
@@ -104,8 +125,25 @@ Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time) {
 
 Vec2 boneTip(const Bone& bone, const Affine& world) { return world.apply({bone.length, 0}); }
 
-std::vector<Vec2> computeVertices(const Skeleton& sk, const Pose& pose, const Slot& slot,
-                                  const Attachment& att) {
+Affine deformBasis(const Pose& pose, const Slot& slot, const Attachment& att, int vertex) {
+    if (!att.isWeighted()) {
+        Affine m = pose.world[slot.bone];
+        m.tx = m.ty = 0;
+        return m;
+    }
+    Affine m{0, 0, 0, 0, 0, 0};
+    for (auto& w : att.weights[vertex]) {
+        const Affine& b = pose.world[w.bone];
+        m.a += b.a * w.weight;
+        m.b += b.b * w.weight;
+        m.c += b.c * w.weight;
+        m.d += b.d * w.weight;
+    }
+    return m;
+}
+
+std::vector<Vec2> computeVertices(const Skeleton& sk, const Pose& pose, const Slot& slot, const Attachment& att,
+                                  const std::vector<Vec2>* deform) {
     std::vector<Vec2> out;
     const Affine& boneWorld = pose.world[slot.bone];
     if (att.type == AttachmentType::Region) {
@@ -119,26 +157,32 @@ std::vector<Vec2> computeVertices(const Skeleton& sk, const Pose& pose, const Sl
                m.apply({w / 2, -h / 2}), m.apply({-w / 2, -h / 2})};
         return out;
     }
+    if (deform && deform->size() != att.vertexCount()) deform = nullptr;
     if (att.isWeighted()) {
         out.resize(att.weights.size());
         for (size_t v = 0; v < att.weights.size(); ++v) {
             Vec2 p;
-            for (auto& w : att.weights[v]) p += pose.world[w.bone].apply(w.local) * w.weight;
+            Vec2 off = deform ? (*deform)[v] : Vec2{};
+            for (auto& w : att.weights[v]) p += pose.world[w.bone].apply(w.local + off) * w.weight;
             out[v] = p;
         }
     } else {
         out.resize(att.vertices.size());
-        for (size_t v = 0; v < att.vertices.size(); ++v) out[v] = boneWorld.apply(att.vertices[v]);
+        for (size_t v = 0; v < att.vertices.size(); ++v)
+            out[v] = boneWorld.apply(deform ? att.vertices[v] + (*deform)[v] : att.vertices[v]);
     }
     return out;
 }
 
 void computeGeometry(const Skeleton& sk, const Pose& pose, const Slot& slot, const Attachment& att,
-                     Geometry& out) {
-    out.positions = computeVertices(sk, pose, slot, att);
+                     Geometry& out, const std::vector<Vec2>* deform) {
+    out.positions = computeVertices(sk, pose, slot, att, deform);
     if (att.type == AttachmentType::Region) {
         out.uvs = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
         out.triangles = {0, 1, 2, 0, 2, 3};
+    } else if (att.isPolygon()) {
+        out.uvs.clear();
+        out.triangles.clear();
     } else {
         out.uvs = att.uvs;
         out.triangles = att.triangles;

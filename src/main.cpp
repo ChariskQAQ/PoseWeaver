@@ -42,7 +42,7 @@ struct Options {
     std::string open;        // project or image to open at startup
     std::string demoImage;   // --demo <png>
     float demoTime = 0.5f;   // --time <seconds>
-    bool demoWeights = false;  // --weights
+    std::string scenario;      // --weights | --mesh | --clip
     bool demoGraph = false;    // --graph
     std::string screenshot;  // --screenshot <png>: save after a few frames and exit
 };
@@ -54,7 +54,7 @@ static Options parseArgs(int argc, char** argv) {
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
         if (a == "--demo") o.demoImage = next();
         else if (a == "--time") o.demoTime = std::strtof(next().c_str(), nullptr);
-        else if (a == "--weights") o.demoWeights = true;
+        else if (a == "--weights" || a == "--mesh" || a == "--clip") o.scenario = a.substr(2);
         else if (a == "--graph") o.demoGraph = true;
         else if (a == "--screenshot") o.screenshot = next();
         else o.open = a;
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
         editor.setUiScale(scale);
         g_editor = &editor;
         glfwSetDropCallback(window, onDrop);
-        if (!opt.demoImage.empty()) editor.buildDemo(opt.demoImage, opt.demoTime, opt.demoWeights);
+        if (!opt.demoImage.empty()) editor.buildDemo(opt.demoImage, opt.demoTime, opt.scenario);
         if (opt.demoGraph) editor.focusGraph();
         else if (!opt.open.empty()) editor.onFilesDropped({opt.open});
         int frameCount = 0;

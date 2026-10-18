@@ -241,6 +241,20 @@ void Editor::propertiesSlot(int s) {
         ImGui::EndTable();
     }
     ImGui::TextDisabled("在树里点附件左侧的圆点切换显示的附件。");
+    if (setup) {
+        if (ImGui::Button("+ 剪裁")) {
+            createPolygonAttachment(s, AttachmentType::Clipping);
+            return;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("新建剪裁插槽：只显示多边形内部的部分");
+        ImGui::SameLine();
+        if (ImGui::Button("+ 边界框")) {
+            createPolygonAttachment(s, AttachmentType::BoundingBox);
+            return;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("新建边界框插槽：导出给游戏做碰撞/点击检测");
+        ImGui::SameLine();
+    }
     if (setup && ImGui::Button("添加图片附件...")) {
         std::string path = openFileDialog("图片 (png/jpg/bmp/tga)", "*.png;*.jpg;*.jpeg;*.bmp;*.tga");
         if (!path.empty()) {
@@ -266,7 +280,13 @@ void Editor::propertiesAttachment(int s, int a) {
     Attachment& att = slot.attachments[a];
     bool setup = mode_ == Mode::Setup;
     bool mesh = att.type == AttachmentType::Mesh;
-    if (propertiesHeader((int)(mesh ? Icon::Mesh : Icon::Region), mesh ? "网格" : "图片", att.name, true, setup)) {
+    const char* typeName = mesh ? "网格" : att.type == AttachmentType::Clipping ? "剪裁"
+                         : att.type == AttachmentType::BoundingBox  ? "边界框"
+                                                                    : "图片";
+    Icon icon = mesh ? Icon::Mesh : att.type == AttachmentType::Clipping ? Icon::Clipping
+              : att.type == AttachmentType::BoundingBox ? Icon::BoundingBox
+                                                        : Icon::Region;
+    if (propertiesHeader((int)icon, typeName, att.name, true, setup)) {
         deleteSelection();
         return;
     }
@@ -284,47 +304,132 @@ void Editor::propertiesAttachment(int s, int a) {
             propLabel("尺寸");
             ImGui::Text("%d x %d", im.width, im.height);
         }
-        if (mesh) {
+        if (att.hasVertices()) {
             propLabel("顶点");
-            ImGui::Text("%d   三角形 %d", (int)att.vertexCount(), (int)att.triangles.size() / 3);
+            if (mesh)
+                ImGui::Text("%d（轮廓 %d）  三角形 %d", (int)att.vertexCount(), att.hullLength, (int)att.triangles.size() / 3);
+            else
+                ImGui::Text("%d", (int)att.vertexCount());
             propLabel("蒙皮");
             ImGui::TextUnformatted(att.isWeighted() ? "已绑定骨骼" : "未绑定");
         }
+        if (att.type == AttachmentType::Clipping) {
+            propLabel("结束插槽");
+            const char* current = att.endSlot >= 0 && att.endSlot < (int)sk_.slots.size() ? sk_.slots[att.endSlot].name.c_str() : "(到最后)";
+            ImGui::BeginDisabled(!setup);
+            if (ImGui::BeginCombo("##end", current)) {
+                if (ImGui::Selectable("(到最后)", att.endSlot < 0)) {
+                    checkpoint();
+                    att.endSlot = -1;
+                }
+                // Only slots drawn after the clipping slot can be clipped.
+                bool after = false;
+                for (int o : pose_.drawOrder) {
+                    if (o == s) {
+                        after = true;
+                        continue;
+                    }
+                    if (!after) continue;
+                    ImGui::PushID(o);
+                    if (ImGui::Selectable(sk_.slots[o].name.c_str(), att.endSlot == o)) {
+                        checkpoint();
+                        att.endSlot = o;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+        }
         ImGui::EndTable();
     }
+
+    // Animate mode: deform keys for vertex attachments.
     if (!setup) {
-        ImGui::TextDisabled("附件只能在 Setup 模式下编辑。");
-        return;
-    }
-    if (!mesh) {
-        ImGui::TextDisabled("选中后用视口工具栏的旋转/移动/缩放调整位置。");
-        ImGui::SeparatorText("转为网格");
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
-        ImGui::InputInt("列", &gridCols_);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
-        ImGui::InputInt("行", &gridRows_);
-        gridCols_ = std::clamp(gridCols_, 1, 64);
-        gridRows_ = std::clamp(gridRows_, 1, 64);
-        if (ImGui::Button("转为网格（按透明区域裁剪）")) {
-            const Texture* tex = att.image >= 0 && att.image < (int)textures_.size() ? &textures_[att.image] : nullptr;
-            const unsigned char* rgba = tex && !tex->rgba.empty() ? tex->rgba.data() : nullptr;
-            Attachment copy = att;
-            if (att.image >= 0 && convertRegionToMesh(copy, sk_.images[att.image], rgba, gridCols_, gridRows_)) {
+        if (att.hasVertices()) {
+            Animation* an = currentAnimation();
+            bool keyed = an && hasKey(*an, s, Channel::Deform, time_, a);
+            ImGui::SeparatorText("变形");
+            ImGui::TextDisabled("用网格工具 (M) 拖动顶点，会在当前帧打变形关键帧。");
+            ImGui::BeginDisabled(!keyed);
+            if (ImGui::Button("删除当前帧的变形关键帧") && an) {
                 checkpoint();
-                att = std::move(copy);
-                setTool(Tool::MeshEdit);
-                setStatus("已生成网格：网格工具 (M) 调整顶点，然后在权重视图 (G) 绑定骨骼");
-            } else {
-                setStatus("生成网格失败：图片为空或完全透明");
+                removeKey(*an, s, Channel::Deform, time_, a);
             }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("网格工具 (M)")) setTool(Tool::MeshEdit);
+        } else {
+            ImGui::TextDisabled("附件只能在 Setup 模式下编辑。");
         }
         return;
     }
-    if (ImGui::Button("编辑网格 (M)")) setTool(Tool::MeshEdit);
+
+    if (att.type == AttachmentType::Region) {
+        ImGui::TextDisabled("选中后用视口工具栏的旋转/移动/缩放调整位置。");
+    }
+    if (att.type == AttachmentType::Region || mesh) {
+        ImGui::SeparatorText(mesh ? "重新生成网格" : "转为网格");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+        ImGui::DragFloat("轮廓容差", &outlineTolerance_, 0.1f, 0.5f, 20.0f, "%.1f px");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+        ImGui::DragFloat("外扩", &outlinePadding_, 0.1f, 0.0f, 20.0f, "%.1f px");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+        ImGui::SliderInt("内部密度", &meshDensity_, 0, 20);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("长边方向上的内部点数量，0 = 只有轮廓");
+        if (ImGui::Button("按图片轮廓自动生成") && autoMesh(s, a)) setTool(Tool::MeshEdit);
+        if (att.type == AttachmentType::Region) {
+            ImGui::SameLine();
+            if (ImGui::Button("规则网格...")) ImGui::OpenPopup("grid");
+            if (ImGui::BeginPopup("grid")) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
+                ImGui::InputInt("列", &gridCols_);
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
+                ImGui::InputInt("行", &gridRows_);
+                gridCols_ = std::clamp(gridCols_, 1, 64);
+                gridRows_ = std::clamp(gridRows_, 1, 64);
+                if (ImGui::Button("生成")) {
+                    const Texture* tex = att.image >= 0 && att.image < (int)textures_.size() ? &textures_[att.image] : nullptr;
+                    const unsigned char* rgba = tex && !tex->rgba.empty() ? tex->rgba.data() : nullptr;
+                    Attachment copy = att;
+                    if (att.image >= 0 && convertRegionToMesh(copy, sk_.images[att.image], rgba, gridCols_, gridRows_)) {
+                        ensureHull(copy);
+                        checkpoint();
+                        att = std::move(copy);
+                        setTool(Tool::MeshEdit);
+                    } else {
+                        setStatus("生成网格失败：图片为空或完全透明");
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+        }
+    }
+    if (!att.hasVertices()) return;
+
+    ImGui::SeparatorText("编辑顶点");
+    ImGui::TextDisabled("网格工具 (M)：拖动顶点，Alt+点击加顶点，Del 删除所选，空白处框选。");
+    if (ImGui::Button("网格工具 (M)")) setTool(Tool::MeshEdit);
     ImGui::SameLine();
+    ImGui::BeginDisabled(sel_.vertices.empty());
+    if (ImGui::Button("删除所选顶点")) meshDeleteSelectedVertices();
+    ImGui::EndDisabled();
+    if (mesh) {
+        ImGui::SameLine();
+        if (ImGui::Button("重新三角化")) {
+            Attachment copy = att;
+            if ((copy.hullLength >= 3 || ensureHull(copy)) && retriangulate(sk_, slot, copy)) {
+                checkpoint();
+                att = std::move(copy);
+                afterTopologyChange(s, a);
+            } else {
+                setStatus("无法三角化：外轮廓自相交或有多个外轮廓");
+            }
+        }
+        ImGui::Checkbox("变形模式（拖动顶点不改变 UV，图片跟着拉伸）", &meshDeformMode_);
+    }
     if (ImGui::Button(att.isWeighted() ? "权重 (G)" : "绑定骨骼 (G)")) setTool(Tool::Weights);
-    ImGui::TextDisabled("网格工具：拖动顶点，空白处框选，Shift 加选。");
 }
 
 void Editor::propertiesAnimation(int i) {
@@ -436,13 +541,13 @@ void Editor::drawWeightsView() {
         return;
     }
     Attachment* att = selectedAttachment();
-    if (sel_.slot < 0 || !att || att->type != AttachmentType::Mesh) {
-        ImGui::TextWrapped("在视口或树中选择一个网格附件。\n图片附件需要先在属性里“转为网格”。");
+    if (sel_.slot < 0 || !att || !att->hasVertices()) {
+        ImGui::TextWrapped("在视口或树中选择一个网格（或剪裁/边界框）附件。\n图片附件需要先在属性里“自动生成网格”。");
         ImGui::End();
         return;
     }
     const Slot& slot = sk_.slots[sel_.slot];
-    ImGui::Text("网格: %s", att->name.c_str());
+    ImGui::Text("附件: %s", att->name.c_str());
 
     if (!att->isWeighted()) {
         ImGui::SeparatorText("绑定骨骼");
@@ -476,37 +581,94 @@ void Editor::drawWeightsView() {
 
     std::vector<int> bones = meshBones(*att);
     if (sel_.bone >= 0 && std::find(bones.begin(), bones.end(), sel_.bone) == bones.end()) bones.push_back(sel_.bone);
-    if (ImGui::BeginTable("weights", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY,
+    auto isLocked = [&](int b) { return std::find(lockedBones_.begin(), lockedBones_.end(), b) != lockedBones_.end(); };
+    const std::vector<int>& selVerts = sel_.vertices;
+    if (ImGui::BeginTable("weights", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY,
                           ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 8))) {
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetTextLineHeight());
         ImGui::TableSetupColumn("骨骼", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("平均", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 3.5f);
+        ImGui::TableSetupColumn(selVerts.empty() ? "平均" : "所选", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 3.5f);
+        ImGui::TableSetupColumn("锁", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
         ImGui::TableHeadersRow();
         for (int b : bones) {
+            // Average over the selected vertices (or all of them).
             float total = 0;
-            for (size_t v = 0; v < att->vertexCount(); ++v) total += vertexWeight(*att, (int)v, b);
-            float avg = att->vertexCount() ? total / att->vertexCount() : 0;
+            int count = 0;
+            if (selVerts.empty()) {
+                for (size_t v = 0; v < att->vertexCount(); ++v, ++count) total += vertexWeight(*att, (int)v, b);
+            } else {
+                for (int v : selVerts) {
+                    total += vertexWeight(*att, v, b);
+                    ++count;
+                }
+            }
+            float avg = count ? total / count : 0;
             ImGui::TableNextRow();
             ImGui::PushID(b);
             ImGui::TableSetColumnIndex(0);
             ImVec4 c = ImColor::HSV(0.66f * (1 - avg), 0.85f, 0.95f);
             ImGui::ColorButton("##w", c, ImGuiColorEditFlags_NoTooltip, ImVec2(1, 1) * ImGui::GetTextLineHeight());
             ImGui::TableSetColumnIndex(1);
-            if (ImGui::Selectable(sk_.bones[b].name.c_str(), sel_.bone == b, ImGuiSelectableFlags_SpanAllColumns)) {
+            if (ImGui::Selectable(sk_.bones[b].name.c_str(), sel_.bone == b)) {
                 int keepSlot = sel_.slot;
+                auto keepVerts = sel_.vertices;
                 selectBone(b);
                 sel_.slot = keepSlot;
+                sel_.vertices = keepVerts;
             }
             ImGui::TableSetColumnIndex(2);
             ImGui::TextDisabled("%.0f%%", avg * 100);
+            ImGui::TableSetColumnIndex(3);
+            bool locked = isLocked(b);
+            if (ImGui::Checkbox("##lock", &locked)) {
+                if (locked) lockedBones_.push_back(b);
+                else lockedBones_.erase(std::remove(lockedBones_.begin(), lockedBones_.end(), b), lockedBones_.end());
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("锁定后，涂抹/平滑/设置都不会改变这根骨骼的权重");
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
     ImGui::TextDisabled("在树里选其他骨骼即可给它刷权重（会加入列表）。");
-    ImGui::SliderFloat("笔刷半径", &brushRadius_, 5, 200, "%.0f px");
-    ImGui::SliderFloat("笔刷强度", &brushStrength_, 0.05f, 2.0f, "%.2f");
+
+    ImGui::SeparatorText("笔刷 (G)");
+    ImGui::SliderFloat("半径", &brushRadius_, 5, 200, "%.0f px");
+    ImGui::SliderFloat("强度", &brushStrength_, 0.05f, 2.0f, "%.2f");
     ImGui::TextDisabled("左键涂抹增加，Ctrl+左键减少。");
+
+    ImGui::SeparatorText(selVerts.empty() ? "数值（先用网格工具 M 选顶点）" : "数值");
+    ImGui::BeginDisabled(selVerts.empty() || sel_.bone < 0);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+    ImGui::SliderFloat("##value", &setWeightValue_, 0, 1, "%.2f");
+    ImGui::SameLine();
+    if (ImGui::Button("设为所选骨骼的权重")) {
+        checkpoint();
+        for (int v : selVerts) setWeight(sk_, slot, *att, v, sel_.bone, setWeightValue_, lockedBones_);
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SeparatorText("整理");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+    ImGui::SliderFloat("平滑程度", &smoothAmount_, 0.05f, 1.0f, "%.2f");
+    ImGui::SameLine();
+    if (ImGui::Button(selVerts.empty() ? "平滑全部" : "平滑所选")) {
+        checkpoint();
+        smoothWeights(sk_, slot, *att, selVerts, smoothAmount_, lockedBones_);
+    }
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4);
+    ImGui::DragFloat("##thr", &pruneThreshold_, 0.005f, 0.0f, 0.5f, "< %.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4);
+    ImGui::SliderInt("##max", &pruneMax_, 1, 8, "最多 %d");
+    ImGui::SameLine();
+    if (ImGui::Button("修剪")) {
+        checkpoint();
+        int removed = pruneWeights(*att, pruneThreshold_, pruneMax_);
+        setStatus("已移除 " + std::to_string(removed) + " 个影响");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("去掉低于阈值的影响，并限制每个顶点的骨骼数");
+
+    ImGui::Spacing();
     if (ImGui::Button("重新自动权重")) {
         checkpoint();
         std::vector<int> mb = meshBones(*att);
