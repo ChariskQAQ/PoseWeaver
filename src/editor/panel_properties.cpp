@@ -2,6 +2,7 @@
 #include "editor/editor.h"
 
 #include "core/mesh_tools.h"
+#include "editor/channels.h"
 #include "editor/icons.h"
 #include "editor/theme.h"
 #include "platform/file_dialog.h"
@@ -73,6 +74,7 @@ void Editor::drawProperties() {
     case Selection::Animation: propertiesAnimation(sel_.index); break;
     case Selection::Image: propertiesImage(sel_.index); break;
     case Selection::Event: propertiesEvent(sel_.index); break;
+    case Selection::Constraint: propertiesConstraint(sel_.index); break;
     default:
         ImGui::TextDisabled("未选择");
         ImGui::Spacing();
@@ -92,6 +94,7 @@ void Editor::drawProperties() {
         case Selection::Attachment: renameBuf_ = sk_.slots[sel_.slot].attachments[sel_.attachment].name; break;
         case Selection::Animation: renameBuf_ = sk_.animations[sel_.index].name; break;
         case Selection::Event: renameBuf_ = sk_.events[sel_.index].name; break;
+        case Selection::Constraint: renameBuf_ = sk_.constraints[sel_.index].name; break;
         default: renameBuf_.clear(); break;
         }
         if (!renameBuf_.empty()) ImGui::OpenPopup("重命名");
@@ -181,6 +184,16 @@ void Editor::propertiesBone(int b) {
             return;
         }
         ImGui::SameLine();
+        if (ImGui::Button("新建约束...")) ImGui::OpenPopup("newcon");
+        if (ImGui::BeginPopup("newcon")) {
+            if (ImGui::MenuItem("IK 约束")) selectConstraint(createConstraint(ConstraintType::Ik));
+            if (ImGui::MenuItem("变换约束")) selectConstraint(createConstraint(ConstraintType::Transform));
+            if (ImGui::MenuItem("路径约束")) selectConstraint(createConstraint(ConstraintType::Path));
+            if (ImGui::MenuItem("物理约束")) selectConstraint(createConstraint(ConstraintType::Physics));
+            ImGui::EndPopup();
+            return;
+        }
+        ImGui::SameLine();
         if (ImGui::Button("新建插槽")) {
             checkpoint();
             Slot s;
@@ -254,6 +267,15 @@ void Editor::propertiesSlot(int s) {
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("新建边界框插槽：导出给游戏做碰撞/点击检测");
         ImGui::SameLine();
+        if (ImGui::Button("+ 路径")) {
+            checkpoint();
+            int ps = addPathSlot(slot.bone, {-100, 0}, {100, 0});
+            selectAttachment(ps, 0);
+            setTool(Tool::MeshEdit);
+            setStatus("已添加路径：拖方点/圆点编辑，Alt+点击加点；再给骨骼建路径约束");
+            return;
+        }
+        ImGui::SameLine();
     }
     if (setup && ImGui::Button("添加图片附件...")) {
         std::string path = openFileDialog("图片 (png/jpg/bmp/tga)", "*.png;*.jpg;*.jpeg;*.bmp;*.tga");
@@ -282,9 +304,11 @@ void Editor::propertiesAttachment(int s, int a) {
     bool mesh = att.type == AttachmentType::Mesh;
     const char* typeName = mesh ? "网格" : att.type == AttachmentType::Clipping ? "剪裁"
                          : att.type == AttachmentType::BoundingBox  ? "边界框"
+                         : att.type == AttachmentType::Path         ? "路径"
                                                                     : "图片";
     Icon icon = mesh ? Icon::Mesh : att.type == AttachmentType::Clipping ? Icon::Clipping
               : att.type == AttachmentType::BoundingBox ? Icon::BoundingBox
+              : att.type == AttachmentType::Path        ? Icon::PathC
                                                         : Icon::Region;
     if (propertiesHeader((int)icon, typeName, att.name, true, setup)) {
         deleteSelection();
@@ -312,6 +336,18 @@ void Editor::propertiesAttachment(int s, int a) {
                 ImGui::Text("%d", (int)att.vertexCount());
             propLabel("蒙皮");
             ImGui::TextUnformatted(att.isWeighted() ? "已绑定骨骼" : "未绑定");
+        }
+        if (att.type == AttachmentType::Path) {
+            propLabel("闭合");
+            bool closed = att.closed;
+            ImGui::BeginDisabled(!setup);
+            if (ImGui::Checkbox("##closed", &closed)) {
+                checkpoint();
+                att.closed = closed;
+            }
+            ImGui::EndDisabled();
+            propLabel("点数");
+            ImGui::Text("%d", (int)att.vertexCount() / 3);
         }
         if (att.type == AttachmentType::Clipping) {
             propLabel("结束插槽");
@@ -497,6 +533,224 @@ void Editor::propertiesEvent(int e) {
     } else {
         ImGui::TextDisabled("切到 Animate 模式后可在时间轴上插入。");
     }
+}
+
+void Editor::propertiesConstraint(int ci) {
+    Constraint& c = sk_.constraints[ci];
+    bool setup = mode_ == Mode::Setup;
+    if (propertiesHeader((int)constraintIcon(c.type), constraintTypeName(c.type), c.name, true, setup)) {
+        deleteSelection();
+        return;
+    }
+    auto boneCombo = [&](const char* id, int current, auto&& onPick, bool allowNone) {
+        const char* label = current >= 0 && current < (int)sk_.bones.size() ? sk_.bones[current].name.c_str() : "(无)";
+        if (!ImGui::BeginCombo(id, label)) return;
+        if (allowNone && ImGui::Selectable("(无)", current < 0)) onPick(-1);
+        for (int b = 0; b < (int)sk_.bones.size(); ++b) {
+            ImGui::PushID(b);
+            if (ImGui::Selectable(sk_.bones[b].name.c_str(), b == current)) onPick(b);
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    };
+
+    if (beginProps("con")) {
+        propLabel("顺序");
+        ImGui::Text("%d / %d", ci + 1, (int)sk_.constraints.size());
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!setup);
+        if (ImGui::ArrowButton("up", ImGuiDir_Up) && ci > 0) {
+            checkpoint();
+            sk_.swapConstraints(ci, ci - 1);
+            selectConstraint(ci - 1);
+            ImGui::EndDisabled();
+            ImGui::EndTable();
+            return;
+        }
+        ImGui::SameLine(0, 2);
+        if (ImGui::ArrowButton("down", ImGuiDir_Down) && ci + 1 < (int)sk_.constraints.size()) {
+            checkpoint();
+            sk_.swapConstraints(ci, ci + 1);
+            selectConstraint(ci + 1);
+            ImGui::EndDisabled();
+            ImGui::EndTable();
+            return;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("约束按顺序依次生效");
+
+        // Target
+        if (c.type == ConstraintType::Ik || c.type == ConstraintType::Transform) {
+            propLabel("目标骨骼");
+            boneCombo("##target", c.target, [&](int b) {
+                if (b >= 0 && std::find(c.bones.begin(), c.bones.end(), b) == c.bones.end()) {
+                    checkpoint();
+                    c.target = b;
+                } else if (b >= 0) {
+                    setStatus("目标不能是被约束的骨骼");
+                }
+            }, false);
+        } else if (c.type == ConstraintType::Path) {
+            propLabel("路径插槽");
+            const char* label = c.target >= 0 && c.target < (int)sk_.slots.size() ? sk_.slots[c.target].name.c_str() : "(无)";
+            if (ImGui::BeginCombo("##pslot", label)) {
+                for (int s = 0; s < (int)sk_.slots.size(); ++s) {
+                    bool hasPath = false;
+                    for (auto& a : sk_.slots[s].attachments) hasPath |= a.type == AttachmentType::Path;
+                    if (!hasPath) continue;
+                    ImGui::PushID(s);
+                    if (ImGui::Selectable(sk_.slots[s].name.c_str(), s == c.target)) {
+                        checkpoint();
+                        c.target = s;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::EndDisabled();
+
+        // Constrained bones
+        propLabel(c.type == ConstraintType::Physics ? "骨骼" : "约束骨骼");
+        ImGui::BeginDisabled(!setup);
+        for (size_t i = 0; i < c.bones.size(); ++i) {
+            ImGui::PushID((int)i);
+            if (ImGui::SmallButton("x") && c.bones.size() > 1) {
+                checkpoint();
+                c.bones.erase(c.bones.begin() + i);
+                ImGui::PopID();
+                break;
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(sk_.bones[c.bones[i]].name.c_str());
+            ImGui::PopID();
+        }
+        bool canAdd = c.type == ConstraintType::Transform || c.type == ConstraintType::Path ||
+                      (c.type == ConstraintType::Ik && c.bones.size() < 2);
+        if (canAdd) {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            boneCombo("##add", -1, [&](int b) {
+                if (b < 0 || b == c.target || std::find(c.bones.begin(), c.bones.end(), b) != c.bones.end()) return;
+                checkpoint();
+                if (c.type == ConstraintType::Ik) {
+                    // Two-bone IK: parent first.
+                    if (sk_.bones[b].parent == c.bones[0]) c.bones.push_back(b);
+                    else if (sk_.bones[c.bones[0]].parent == b) c.bones.insert(c.bones.begin(), b);
+                    else setStatus("两骨骼 IK 需要父子相连的骨骼");
+                } else {
+                    c.bones.push_back(b);
+                }
+            }, false);
+        }
+        ImGui::EndDisabled();
+
+        // Type specific settings (Setup only)
+        ImGui::BeginDisabled(!setup);
+        auto check = [&](const char* label, bool& v) {
+            propLabel(label);
+            bool x = v;
+            if (ImGui::Checkbox((std::string("##") + label).c_str(), &x)) {
+                checkpoint();
+                v = x;
+            }
+        };
+        auto drag = [&](const char* label, float& v, float speed, const char* fmt) {
+            propLabel(label);
+            float x = v;
+            bool changed = ImGui::DragFloat((std::string("##") + label).c_str(), &x, speed, 0, 0, fmt);
+            if (ImGui::IsItemActivated()) checkpoint();
+            if (changed) v = x;
+        };
+        switch (c.type) {
+        case ConstraintType::Ik:
+            check("拉伸", c.stretch);
+            check("压缩", c.compress);
+            check("等比缩放", c.uniform);
+            break;
+        case ConstraintType::Transform:
+            drag("旋转偏移", c.offsetRotation, 0.5f, "%.1f°");
+            drag("X 偏移", c.offsetX, 0.5f, "%.1f");
+            drag("Y 偏移", c.offsetY, 0.5f, "%.1f");
+            drag("缩放 X 偏移", c.offsetScaleX, 0.01f, "%.2f");
+            drag("缩放 Y 偏移", c.offsetScaleY, 0.01f, "%.2f");
+            drag("斜切偏移", c.offsetShearY, 0.5f, "%.1f°");
+            check("局部", c.local);
+            check("相对", c.relative);
+            break;
+        case ConstraintType::Path: {
+            auto combo = [&](const char* label, int current, std::initializer_list<const char*> names) {
+                propLabel(label);
+                int v = current;
+                std::vector<const char*> items(names);
+                if (ImGui::Combo((std::string("##") + label).c_str(), &v, items.data(), (int)items.size()) && v != current) {
+                    checkpoint();
+                    return v;
+                }
+                return current;
+            };
+            c.positionMode = (PathPositionMode)combo("位置模式", (int)c.positionMode, {"固定长度", "百分比"});
+            c.spacingMode = (PathSpacingMode)combo("间距模式", (int)c.spacingMode, {"骨骼长度", "固定", "百分比"});
+            c.rotateMode = (PathRotateMode)combo("旋转模式", (int)c.rotateMode, {"切线", "链", "链 + 缩放"});
+            drag("旋转偏移", c.offsetRotation, 0.5f, "%.1f°");
+            break;
+        }
+        case ConstraintType::Physics:
+            check("X", c.physX);
+            check("Y", c.physY);
+            check("旋转", c.physRotate);
+            drag("惯性", c.inertia, 0.01f, "%.2f");
+            drag("强度", c.strength, 1.0f, "%.0f");
+            drag("阻尼", c.damping, 0.01f, "%.2f");
+            drag("质量", c.mass, 0.01f, "%.2f");
+            drag("速度上限", c.limit, 10.0f, "%.0f");
+            break;
+        }
+        ImGui::EndDisabled();
+        ImGui::EndTable();
+    }
+
+    // Keyable values: Setup edits the setup values; Animate keys them at the current time.
+    ImGui::SeparatorText(setup ? "数值（Setup）" : "数值（会打关键帧）");
+    ConstraintValues v = ci < (int)pose_.constraints.size() ? pose_.constraints[ci] : c.values;
+    if (!setup) {
+        Animation* an = currentAnimation();
+        bool keyed = an && hasKey(*an, ci, Channel::Constraint, time_);
+        if (keyButton("kc", keyed ? theme::kKeyKeyed : theme::kKeyNone, keyed ? "当前帧已有约束关键帧" : "为当前数值打关键帧"))
+            keyConstraint(ci);
+        ImGui::SameLine();
+        ImGui::TextDisabled(keyed ? "当前帧有关键帧" : "当前帧无关键帧");
+    }
+    if (beginProps("vals")) {
+        for (int i = 0; i < constraintValueCount(c.type); ++i) {
+            propLabel(constraintValueName(c.type, i));
+            ImGui::PushID(i);
+            bool changed = false;
+            float x = v[i];
+            if (c.type == ConstraintType::Ik && i == 2) {
+                int bend = x < 0 ? 1 : 0;
+                const char* items[] = {"正向", "反向"};
+                if (ImGui::Combo("##bend", &bend, items, 2)) {
+                    checkpoint();
+                    x = bend ? -1.0f : 1.0f;
+                    changed = true;
+                }
+            } else {
+                bool isMix = (c.type == ConstraintType::Ik && i == 0) || c.type == ConstraintType::Transform ||
+                             (c.type == ConstraintType::Path && i >= 2) || (c.type == ConstraintType::Physics && i == 0);
+                if (isMix) changed = ImGui::SliderFloat("##v", &x, 0.0f, 1.0f, "%.2f");
+                else changed = ImGui::DragFloat("##v", &x, c.type == ConstraintType::Path && i < 2 && c.positionMode == PathPositionMode::Percent ? 0.005f : 0.5f);
+                if (ImGui::IsItemActivated()) checkpoint();
+            }
+            if (changed) {
+                v[i] = x;
+                setConstraintValues(ci, v);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (c.type == ConstraintType::Physics)
+        ImGui::TextDisabled(physicsOn_ ? "物理预览已开启：拖动父骨骼或播放动画观察效果。" : "物理预览已关闭（视口工具栏 → 物理预览）。");
+    if (c.type == ConstraintType::Path) ImGui::TextDisabled("选中路径附件后用网格工具 (M) 编辑：方点是路径点，圆点是手柄，Alt+点击加点。");
 }
 
 void Editor::propertiesImage(int i) {

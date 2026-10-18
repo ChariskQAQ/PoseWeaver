@@ -301,6 +301,11 @@ void Editor::drawMainToolbar() {
         if (iconButton("keyall", Icon::Key, "全部打帧", false, w, animate && sel_.bone >= 0) && sel_.bone >= 0)
             keyBone(sel_.bone, true, true, true, true);
         ImGui::EndDisabled();
+        if (iconButton("physics", Icon::Physics, "物理预览", physicsOn_, w)) {
+            physicsOn_ = !physicsOn_;
+            physics_.reset();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("实时模拟物理约束（拖动骨骼、播放动画时生效）");
     }
     endGroup();
     nextX();

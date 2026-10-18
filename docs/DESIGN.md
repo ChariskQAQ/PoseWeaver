@@ -39,6 +39,8 @@ Skeleton
                  Clipping / BoundingBox { vertices[] 或 weights[][]（多边形）, Clipping 另有 endSlot }
   images[]     : 相对工程文件的路径
   events[]     : name, int, float, string, audio（事件定义，关键帧可覆盖数值）
+  constraints[]: type(ik|transform|path|physics), bones[], target（骨骼；路径约束为插槽）,
+                 values[6]（可打关键帧的混合值等）, 各类型的参数；数组顺序 = 生效顺序
   animations[] : name, duration,
                  boneTimelines[bone] { rotate/translate/scale/shear 关键帧 }
                  slotTimelines[slot] { attachment / color 关键帧, deform[附件] { 每顶点偏移 } }
@@ -55,6 +57,9 @@ Skeleton
 - 变形偏移：未绑定顶点加在 slot 骨骼空间；已绑定顶点加到每个 localᵢ 上（随骨骼一起转动）。
 - 剪裁：剪裁多边形先三角化成凸块，后续插槽的三角形对每个凸块做 Sutherland–Hodgman 裁剪，直到 endSlot。
 - 网格三角化：外轮廓耳切 → 插入内部点 → Lawson 翻边（不翻轮廓边），得到约束 Delaunay 三角网。
+- 约束：Pose.local 是 setup+动画（打关键帧读它），Pose.applied 是约束后的局部变换（世界矩阵由它算）。
+  每个约束读当前世界矩阵、算出被约束骨骼的新世界矩阵，再换回 applied 并更新子树。
+- 物理约束依赖上一帧，不是时间的纯函数：状态（PhysicsState）由编辑器/运行时持有，每帧推进。
 
 ## 撤销
 

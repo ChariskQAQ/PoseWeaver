@@ -26,6 +26,11 @@ ImU32 iconColor(Icon icon) {
     case Icon::Clipping: return IM_COL32(200, 110, 255, 255);
     case Icon::BoundingBox: return IM_COL32(110, 230, 120, 255);
     case Icon::Deform: return theme::kDeform;
+    case Icon::Constraint: return theme::kConstraint;
+    case Icon::Ik: return IM_COL32(240, 90, 90, 255);
+    case Icon::TransformC: return IM_COL32(240, 200, 80, 255);
+    case Icon::PathC: return IM_COL32(255, 150, 60, 255);
+    case Icon::Physics: return IM_COL32(90, 210, 240, 255);
     case Icon::Slot: return IM_COL32(120, 200, 255, 255);
     case Icon::Region: return IM_COL32(120, 200, 140, 255);
     case Icon::Mesh: return IM_COL32(110, 200, 230, 255);
@@ -182,6 +187,38 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float size, ImU32 col) {
         dl->AddPolyline(bottom, n + 1, col, 0, t * 1.2f);
         dl->AddLine(top[0], bottom[0], col, t);
         dl->AddLine(top[n], bottom[n], col, t);
+        break;
+    }
+    case Icon::Constraint:
+    case Icon::Ik: {
+        ImVec2 a = P(c, s, -0.85f, 0.75f), b = P(c, s, -0.15f, 0.0f), d = P(c, s, 0.45f, -0.55f);
+        dl->AddLine(a, b, col, t * 1.4f);
+        dl->AddLine(b, d, col, t * 1.4f);
+        dl->AddCircle(P(c, s, 0.55f, -0.55f), s * 0.32f, col, 0, t * 1.2f);
+        dl->AddCircleFilled(b, s * 0.15f, col);
+        break;
+    }
+    case Icon::TransformC:
+        dl->AddRect(P(c, s, -0.85f, -0.15f), P(c, s, -0.15f, 0.55f), col, 0, 0, t * 1.2f);
+        dl->AddRectFilled(P(c, s, 0.15f, -0.65f), P(c, s, 0.85f, 0.05f), col);
+        dl->AddLine(P(c, s, -0.15f, -0.15f), P(c, s, 0.15f, -0.3f), col, t);
+        break;
+    case Icon::PathC: {
+        const int n = 12;
+        ImVec2 pts[n + 1];
+        for (int i = 0; i <= n; ++i) {
+            float x = -0.85f + 1.7f * i / n;
+            pts[i] = P(c, s, x, 0.45f * std::sin(i * 0.55f));
+        }
+        dl->AddPolyline(pts, n + 1, col, 0, t * 1.3f);
+        dl->AddCircleFilled(pts[0], s * 0.16f, col);
+        dl->AddCircleFilled(pts[n], s * 0.16f, col);
+        break;
+    }
+    case Icon::Physics: {
+        ImVec2 pts[8];
+        for (int i = 0; i < 8; ++i) pts[i] = P(c, s, -0.8f + 1.6f * i / 7, (i % 2 ? -0.45f : 0.45f) * (i == 0 || i == 7 ? 0 : 1));
+        dl->AddPolyline(pts, 8, col, 0, t * 1.3f);
         break;
     }
     case Icon::Local:

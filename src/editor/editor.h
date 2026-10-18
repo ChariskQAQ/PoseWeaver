@@ -1,4 +1,5 @@
 #pragma once
+#include "core/constraints.h"
 #include "core/pose.h"
 #include "platform/texture.h"
 
@@ -14,11 +15,11 @@ enum class Tool { Rotate, Translate, Scale, Shear, Pose, CreateBone, MeshEdit, W
 enum class Axes { Local, Parent, World };
 
 struct Selection {
-    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image, Event } kind = None;
+    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image, Event, Constraint } kind = None;
     int bone = -1;        // also set for slots/attachments (their bone), used by transform tools
     int slot = -1;
     int attachment = -1;  // attachment index inside `slot`
-    int index = -1;       // animation, image or event index
+    int index = -1;       // animation, image, event or constraint index
     std::vector<int> vertices;  // selected mesh vertices (MeshEdit tool)
     void clear() { *this = Selection{}; }
 };
@@ -177,6 +178,9 @@ private:
     bool closeConfirmed_ = false;
     bool showDemo_ = false;
     bool resetLayout_ = false;
+    rig::PhysicsState physics_;
+    bool physicsOn_ = true;
+    float physicsDt_ = 0;  // time to simulate in the next updatePose (set once per frame)
     struct FiredEvent { std::string text; float timeLeft; };
     std::vector<FiredEvent> firedEvents_;
     int focusWeights_ = 0;
@@ -233,6 +237,7 @@ private:
     void propertiesAnimation(int a);
     void propertiesImage(int i);
     void propertiesEvent(int e);
+    void propertiesConstraint(int c);
     bool propertiesHeader(int icon, const std::string& type, const std::string& name, bool canRename, bool canDelete);
 
     // selection
@@ -241,6 +246,7 @@ private:
     void selectAttachment(int s, int a);
     void selectAnimation(int a);
     void selectEvent(int e);
+    void selectConstraint(int c);
     void validateSelection();
 
     // document operations
@@ -271,6 +277,14 @@ private:
     void keyBone(int bone, bool rot, bool trans, bool scale, bool shear = false);
     void setSlotColor(int slot, const rig::Color& color);  // setup colour, or a colour key in Animate mode
     KeyState slotColorKeyState(int slot);
+    // Constraints: create from the current selection, key current values, set values (Setup: setup
+    // values, Animate: a key at the current time).
+    int createConstraint(rig::ConstraintType type);
+    void keyConstraint(int c);
+    void setConstraintValues(int c, const rig::ConstraintValues& v);
+    void drawConstraints(ImDrawList* dl);
+    void drawPaths(ImDrawList* dl);
+    int addPathSlot(int bone, rig::Vec2 fromLocal, rig::Vec2 toLocal);
     // Moves a slot one step in the draw order: setup order in Setup mode, a draw order key in Animate mode.
     void moveDrawOrder(int slot, int delta);
     void keyEvent(int event);  // event key at the current time

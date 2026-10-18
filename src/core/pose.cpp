@@ -1,4 +1,5 @@
 #include "core/pose.h"
+#include "core/constraints.h"
 
 #include <algorithm>
 
@@ -14,6 +15,8 @@ void resetToSetup(const Skeleton& sk, Pose& pose) {
     pose.local.resize(sk.bones.size());
     pose.world.assign(sk.bones.size(), Affine{});
     for (size_t i = 0; i < sk.bones.size(); ++i) pose.local[i] = sk.bones[i].setup;
+    pose.constraints.resize(sk.constraints.size());
+    for (size_t i = 0; i < sk.constraints.size(); ++i) pose.constraints[i] = sk.constraints[i].values;
     pose.slotAttachment.resize(sk.slots.size());
     pose.slotColor.resize(sk.slots.size());
     pose.drawOrder.resize(sk.slots.size());
@@ -92,6 +95,20 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
             pose.deform[{si, ai}] = std::move(offsets);
         }
     }
+    for (auto& [ci, keys] : anim.constraints) {
+        if (ci < 0 || ci >= (int)pose.constraints.size() || keys.empty()) continue;
+        int i = keyBefore(keys, time);
+        const ConstraintKey& k0 = keys[std::max(i, 0)];
+        ConstraintValues v = k0.value;
+        if (i >= 0 && i + 1 < (int)keys.size()) {
+            const ConstraintKey& k1 = keys[i + 1];
+            float span = k1.time - k0.time;
+            float f = applyCurve(k0.curve, span > 1e-8f ? (time - k0.time) / span : 0.0f);
+            for (int j = 0; j < 6; ++j) v[j] = k0.value[j] + (k1.value[j] - k0.value[j]) * f;
+        }
+        if (sk.constraints[ci].type == ConstraintType::Ik) v[2] = k0.value[2] < 0 ? -1.0f : 1.0f;  // bend is stepped
+        pose.constraints[ci] = v;
+    }
     // Draw order is stepped: the last key at or before `time` wins (before the first key: setup).
     const DrawOrderKey* order = nullptr;
     for (auto& k : anim.drawOrder)
@@ -101,8 +118,23 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
 
 void updateWorld(const Skeleton& sk, Pose& pose) {
     pose.world.resize(sk.bones.size());
+    pose.applied = pose.local;
     for (int i : sk.updateOrder()) {
-        Affine localM = pose.local[i].matrix();
+        Affine localM = pose.applied[i].matrix();
+        int p = sk.bones[i].parent;
+        pose.world[i] = p >= 0 ? pose.world[p] * localM : localM;
+    }
+    if (pose.constraints.size() != sk.constraints.size()) {
+        pose.constraints.resize(sk.constraints.size());
+        for (size_t i = 0; i < sk.constraints.size(); ++i) pose.constraints[i] = sk.constraints[i].values;
+    }
+    applyConstraints(sk, pose);
+}
+
+void updateSubtree(const Skeleton& sk, Pose& pose, int bone) {
+    for (int i : sk.updateOrder()) {
+        if (!sk.isAncestor(bone, i)) continue;
+        Affine localM = pose.applied[i].matrix();
         int p = sk.bones[i].parent;
         pose.world[i] = p >= 0 ? pose.world[p] * localM : localM;
     }

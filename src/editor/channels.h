@@ -15,6 +15,7 @@ inline const char* channelName(rig::Channel ch) {
     case rig::Channel::DrawOrder: return "绘制顺序";
     case rig::Channel::Event: return "事件";
     case rig::Channel::Deform: return "变形";
+    case rig::Channel::Constraint: return "约束";
     }
     return "";
 }
@@ -30,6 +31,7 @@ inline ImU32 channelColor(rig::Channel ch) {
     case rig::Channel::DrawOrder: return theme::kDrawOrder;
     case rig::Channel::Event: return theme::kEvent;
     case rig::Channel::Deform: return theme::kDeform;
+    case rig::Channel::Constraint: return theme::kConstraint;
     }
     return theme::kMixed;
 }
@@ -45,9 +47,30 @@ inline Icon channelIcon(rig::Channel ch) {
     case rig::Channel::DrawOrder: return Icon::DrawOrder;
     case rig::Channel::Event: return Icon::Event;
     case rig::Channel::Deform: return Icon::Deform;
+    case rig::Channel::Constraint: return Icon::Constraint;
     }
     return Icon::Key;
 }
 
 // Bit per channel, used to merge keys of several channels on one row.
 inline unsigned channelBit(rig::Channel ch) { return 1u << (unsigned)ch; }
+
+inline Icon constraintIcon(rig::ConstraintType t) {
+    switch (t) {
+    case rig::ConstraintType::Ik: return Icon::Ik;
+    case rig::ConstraintType::Transform: return Icon::TransformC;
+    case rig::ConstraintType::Path: return Icon::PathC;
+    case rig::ConstraintType::Physics: return Icon::Physics;
+    }
+    return Icon::Constraint;
+}
+
+inline const char* constraintTypeName(rig::ConstraintType t) {
+    switch (t) {
+    case rig::ConstraintType::Ik: return "IK 约束";
+    case rig::ConstraintType::Transform: return "变换约束";
+    case rig::ConstraintType::Path: return "路径约束";
+    case rig::ConstraintType::Physics: return "物理约束";
+    }
+    return "约束";
+}

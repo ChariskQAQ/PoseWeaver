@@ -9,7 +9,8 @@
 - Setup / Animate 双模式（Tab 切换）；Animate 模式下拖动骨骼自动打关键帧
 - 网格：按图片轮廓自动生成（约束 Delaunay），Alt+点击加顶点、Del 删除，UV 跟随或变形模式
 - 变形关键帧：Animate 模式下用网格工具拖顶点
-- 剪裁、边界框附件（插槽属性里 + 剪裁 / + 边界框）
+- 剪裁、边界框、路径附件（插槽属性里 + 剪裁 / + 边界框 / + 路径）
+- 约束：IK、变换、路径、物理（骨骼属性 → 新建约束，或树的“约束”节点右键），数值可打关键帧，物理实时预览
 - 蒙皮：绑定多根骨骼并自动计算权重，笔刷涂抹（Ctrl 减少）、锁定骨骼、数值设置、平滑、修剪
 - 时间轴：多动画、播放/倒放/循环/变速，Dopesheet 拖动关键帧，右键删除或改曲线
 - Graph 曲线编辑：贝塞尔手柄、缓入缓出等预设
@@ -36,7 +37,7 @@ build\Release\RigEditor.exe --demo samples\arm.png        :: 两骨骼蒙皮手�
 build\Release\RigEditor.exe path\to\project.rig.json
 ```
 
-`--weights` / `--mesh` / `--clip` 以权重、网格编辑、剪裁场景打开 demo，`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
+`--weights` / `--mesh` / `--clip` / `--ik` / `--path` 以对应场景打开 demo，`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
 
 ## 界面
 

@@ -2,6 +2,7 @@
 #include "editor/editor.h"
 
 #include "core/mesh_tools.h"
+#include "editor/channels.h"
 #include "editor/icons.h"
 #include "editor/theme.h"
 #include "platform/file_dialog.h"
@@ -237,6 +238,13 @@ void Editor::drawTree() {
                     t.x = bone.length;
                     selectBone(sk_.addBone("bone", b, t, 50));
                 }
+                if (ImGui::BeginMenu("新建约束", setup)) {
+                    if (ImGui::MenuItem("IK 约束")) selectConstraint(createConstraint(ConstraintType::Ik));
+                    if (ImGui::MenuItem("变换约束")) selectConstraint(createConstraint(ConstraintType::Transform));
+                    if (ImGui::MenuItem("路径约束")) selectConstraint(createConstraint(ConstraintType::Path));
+                    if (ImGui::MenuItem("物理约束")) selectConstraint(createConstraint(ConstraintType::Physics));
+                    ImGui::EndMenu();
+                }
                 if (ImGui::MenuItem("新建插槽", nullptr, false, setup)) {
                     checkpoint();
                     Slot s;
@@ -289,6 +297,7 @@ void Editor::drawTree() {
                         bool selected = sel_.kind == Selection::Attachment && sel_.slot == s && sel_.attachment == a;
                         Icon icon = att.type == AttachmentType::Mesh ? Icon::Mesh : att.type == AttachmentType::Clipping ? Icon::Clipping
                                     : att.type == AttachmentType::BoundingBox ? Icon::BoundingBox
+                                    : att.type == AttachmentType::Path        ? Icon::PathC
                                                                               : Icon::Region;
                         RowResult r = treeRow("att", icon, att.name,
                                               selected, true, false, active ? 0 : IM_COL32(150, 150, 150, 255));
@@ -364,6 +373,33 @@ void Editor::drawTree() {
             setDrawOrderKey(*an, time_, order);
             updatePose();
         }
+    }
+
+    // ---- constraints ----
+    ImGui::TableNextRow();
+    RowResult cons = treeRow("constraints", Icon::Constraint, "约束", false, sk_.constraints.empty(), false);
+    if (cons.rightClicked) ImGui::OpenPopup("conctx");
+    if (ImGui::BeginPopup("conctx")) {
+        ImGui::TextDisabled("约束所选骨骼");
+        if (ImGui::MenuItem("IK 约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Ik));
+        if (ImGui::MenuItem("变换约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Transform));
+        if (ImGui::MenuItem("路径约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Path));
+        if (ImGui::MenuItem("物理约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Physics));
+        ImGui::EndPopup();
+    }
+    if (cons.open) {
+        for (int i = 0; i < (int)sk_.constraints.size(); ++i) {
+            ImGui::PushID(12000 + i);
+            ImGui::TableNextRow();
+            const Constraint& c = sk_.constraints[i];
+            if (animate && an && keyCell("k", hasKey(*an, i, Channel::Constraint, time_) ? KeyState::Keyed : KeyState::None, "为约束的当前数值打关键帧"))
+                keyConstraint(i);
+            bool selected = sel_.kind == Selection::Constraint && sel_.index == i;
+            RowResult r = treeRow("c", constraintIcon(c.type), c.name, selected, true, false);
+            if (r.clicked) selectConstraint(i);
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
     }
 
     // ---- animations ----

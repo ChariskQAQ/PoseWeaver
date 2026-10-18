@@ -34,6 +34,7 @@ constexpr ImU32 kColor = IM_COL32(240, 120, 190, 255);
 constexpr ImU32 kDrawOrder = IM_COL32(120, 160, 255, 255);
 constexpr ImU32 kEvent = IM_COL32(170, 110, 235, 255);
 constexpr ImU32 kDeform = IM_COL32(90, 210, 220, 255);
+constexpr ImU32 kConstraint = IM_COL32(240, 110, 110, 255);
 constexpr ImU32 kMixed = IM_COL32(240, 240, 240, 255);
 
 // Viewport.

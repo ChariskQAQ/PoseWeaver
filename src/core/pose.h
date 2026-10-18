@@ -5,19 +5,24 @@ namespace rig {
 
 // Evaluated state of a skeleton: what gets drawn.
 struct Pose {
-    std::vector<Transform> local;     // per bone
+    std::vector<Transform> local;     // per bone: setup + animation (what gets keyed)
+    std::vector<Transform> applied;   // per bone: after constraints (what world is computed from)
     std::vector<Affine> world;        // per bone
     std::vector<int> slotAttachment;  // per slot, -1 = none
     std::vector<Color> slotColor;     // per slot
     std::vector<int> drawOrder;       // slot indices, back to front
     std::map<std::pair<int, int>, std::vector<Vec2>> deform;  // (slot, attachment) -> vertex offsets
+    std::vector<ConstraintValues> constraints;                // per constraint: setup or animated values
 };
 // Deform offsets of an attachment in this pose, or null.
 const std::vector<Vec2>* findDeform(const Pose& pose, int slot, int attachment);
 
 void resetToSetup(const Skeleton& sk, Pose& pose);
 void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose& pose);
+// World transforms from `local`, then every constraint (except physics) in order.
 void updateWorld(const Skeleton& sk, Pose& pose);
+// World transforms of `bone` and its descendants from `applied` (used by constraint solvers).
+void updateSubtree(const Skeleton& sk, Pose& pose, int bone);
 Pose makeSetupPose(const Skeleton& sk);
 Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time);
 

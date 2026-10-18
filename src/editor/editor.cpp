@@ -59,7 +59,9 @@ void Editor::frame(float dt) {
     if (!pending_.empty() &&
         (mode_ != Mode::Animate || anim_ != pendingAnim_ || std::fabs(time_ - pendingTime_) > kKeyEpsilon))
         pending_.clear();
+    physicsDt_ = dt;  // physics advances once per frame; other updatePose calls only re-apply it
     updatePose();
+    physicsDt_ = 0;
     if (statusTime_ > 0) statusTime_ -= dt;
 
     drawMenuBar();
@@ -194,6 +196,13 @@ void Editor::selectEvent(int e) {
     sel_.index = e;
 }
 
+void Editor::selectConstraint(int c) {
+    sel_.clear();
+    if (c < 0 || c >= (int)sk_.constraints.size()) return;
+    sel_.kind = Selection::Constraint;
+    sel_.index = c;
+}
+
 void Editor::validateSelection() {
     if (sel_.bone >= (int)sk_.bones.size()) sel_.bone = -1;
     if (sel_.slot >= (int)sk_.slots.size()) sel_.slot = -1;
@@ -205,6 +214,7 @@ void Editor::validateSelection() {
     case Selection::Animation: if (sel_.index >= (int)sk_.animations.size()) sel_.kind = Selection::None; break;
     case Selection::Image: if (sel_.index >= (int)sk_.images.size()) sel_.kind = Selection::None; break;
     case Selection::Event: if (sel_.index >= (int)sk_.events.size()) sel_.kind = Selection::None; break;
+    case Selection::Constraint: if (sel_.index >= (int)sk_.constraints.size()) sel_.kind = Selection::None; break;
     default: break;
     }
     Attachment* a = selectedAttachment();
@@ -242,6 +252,7 @@ Attachment* Editor::transformTargetAttachment() {
 void Editor::updatePose() {
     if (mode_ == Mode::Setup) {
         pose_ = makeSetupPose(sk_);
+        if (physicsOn_) applyPhysics(sk_, pose_, physics_, physicsDt_);
         return;
     }
     resetToSetup(sk_, pose_);
@@ -264,6 +275,7 @@ void Editor::updatePose() {
         }
     }
     updateWorld(sk_, pose_);
+    if (physicsOn_) applyPhysics(sk_, pose_, physics_, physicsDt_);
 }
 
 Animation* Editor::currentAnimation() {
@@ -519,6 +531,7 @@ void Editor::newProject() {
     playing_ = false;
     mode_ = Mode::Setup;
     pending_.clear();
+    physics_.reset();
     hiddenBones_.clear();
     hiddenSlots_.clear();
     collapsedBones_.clear();
@@ -714,6 +727,11 @@ void Editor::renameSelection(const std::string& name) {
         checkpoint();
         sk_.events[sel_.index].name = sk_.uniqueEventName(name);
         break;
+    case Selection::Constraint:
+        if (name == sk_.constraints[sel_.index].name) return;
+        checkpoint();
+        sk_.constraints[sel_.index].name = sk_.uniqueConstraintName(name);
+        break;
     default:
         break;
     }
@@ -752,6 +770,13 @@ void Editor::deleteSelection() {
         sk_.removeEvent(sel_.index);
         sel_.clear();
         setStatus("已删除事件");
+        return;
+    case Selection::Constraint:
+        checkpoint();
+        sk_.removeConstraint(sel_.index);
+        physics_.reset();
+        sel_.clear();
+        setStatus("已删除约束");
         return;
     case Selection::Image: {
         int img = sel_.index;
@@ -796,6 +821,115 @@ void Editor::deleteSelection() {
     }
 }
 
+// ---------------------------------------------------------------- constraints
+
+int Editor::addPathSlot(int bone, Vec2 a, Vec2 b) {
+    Slot slot;
+    slot.name = sk_.uniqueSlotName("path");
+    slot.bone = bone;
+    Attachment path;
+    path.name = "path";
+    path.type = AttachmentType::Path;
+    Vec2 d = (b - a) * (1.0f / 3);
+    makePolygon(path, {a - d, a, a + d, b - d, b, b + d});
+    slot.attachments.push_back(path);
+    slot.activeAttachment = 0;
+    sk_.slots.push_back(slot);
+    return (int)sk_.slots.size() - 1;
+}
+
+int Editor::createConstraint(ConstraintType type) {
+    int b = sel_.bone;
+    if (b < 0 || b >= (int)sk_.bones.size()) {
+        setStatus("先选择要约束的骨骼");
+        return -1;
+    }
+    if (mode_ != Mode::Setup) {
+        setStatus("请在 Setup 模式下新建约束");
+        return -1;
+    }
+    checkpoint();
+    Pose setup = makeSetupPose(sk_);
+    int root = 0;
+    while (root < (int)sk_.bones.size() && sk_.bones[root].parent >= 0) ++root;
+    auto targetBone = [&](const std::string& name, Vec2 world) {
+        Transform t = decompose(setup.world[root].inverse() * Affine::fromTRS(world.x, world.y, 0, 1, 1));
+        return sk_.addBone(name, root, t, 0);
+    };
+    Constraint c;
+    c.type = type;
+    c.values = defaultConstraintValues(type);
+    const std::string bn = sk_.bones[b].name;  // copy: adding target bones reallocates sk_.bones
+    switch (type) {
+    case ConstraintType::Ik: {
+        int parent = sk_.bones[b].parent;
+        bool two = parent >= 0 && sk_.bones[parent].length > 0;
+        c.bones = two ? std::vector<int>{parent, b} : std::vector<int>{b};
+        c.target = targetBone(bn + "_ik", boneTip(sk_.bones[b], setup.world[b]));
+        c.name = sk_.uniqueConstraintName(bn + "_ik");
+        break;
+    }
+    case ConstraintType::Transform:
+        c.bones = {b};
+        c.target = targetBone(bn + "_target", setup.world[b].origin());
+        c.name = sk_.uniqueConstraintName(bn + "_transform");
+        break;
+    case ConstraintType::Path: {
+        // The chain starting at the bone (following first children) lies along a new path.
+        std::vector<int> chain{b};
+        float total = sk_.bones[b].length;
+        for (int cur = b; chain.size() < 16;) {
+            std::vector<int> kids = sk_.children(cur);
+            if (kids.empty()) break;
+            cur = kids[0];
+            chain.push_back(cur);
+            total += sk_.bones[cur].length;
+        }
+        Vec2 start = setup.world[b].origin();
+        Vec2 dir = setup.world[b].applyVector({1, 0});
+        float dl = std::max(length(dir), 1e-4f);
+        Vec2 end = start + dir * (std::max(total, 100.0f) / dl);
+        Affine toRoot = setup.world[root].inverse();
+        c.bones = chain;
+        c.target = addPathSlot(root, toRoot.apply(start), toRoot.apply(end));
+        c.name = sk_.uniqueConstraintName(bn + "_path");
+        break;
+    }
+    case ConstraintType::Physics:
+        c.bones = {b};
+        c.name = sk_.uniqueConstraintName(bn + "_physics");
+        break;
+    }
+    sk_.constraints.push_back(c);
+    physics_.reset();
+    int index = (int)sk_.constraints.size() - 1;
+    selectConstraint(index);
+    updatePose();
+    static const char* hints[] = {"已新建 IK 约束：移动目标骨骼 (V) 看效果", "已新建变换约束：移动/旋转目标骨骼看效果",
+                                  "已新建路径约束：用网格工具 (M) 编辑路径", "已新建物理约束：拖动父骨骼或播放动画看效果"};
+    setStatus(hints[(int)type]);
+    return index;
+}
+
+void Editor::keyConstraint(int c) {
+    if (c < 0 || c >= (int)sk_.constraints.size() || mode_ != Mode::Animate) return;
+    checkpoint();
+    if (!currentAnimation()) createAnimation();
+    setConstraintKey(*currentAnimation(), c, time_, c < (int)pose_.constraints.size() ? pose_.constraints[c] : sk_.constraints[c].values);
+    updatePose();
+}
+
+void Editor::setConstraintValues(int c, const ConstraintValues& v) {
+    if (c < 0 || c >= (int)sk_.constraints.size()) return;
+    if (mode_ == Mode::Setup) {
+        sk_.constraints[c].values = v;
+    } else {
+        if (!currentAnimation()) createAnimation();
+        setConstraintKey(*currentAnimation(), c, time_, v);
+    }
+    updatePose();
+}
+
 // ---------------------------------------------------------------- mesh & polygon editing
 
 void Editor::afterTopologyChange(int slot, int attachment) {
@@ -813,6 +947,23 @@ void Editor::meshAddVertexAt(ImVec2 mouse) {
     }
     int s = sel_.slot, a = attachmentIndex(s, att);
     const Slot& slot = sk_.slots[s];
+    if (att->type == AttachmentType::Path) {
+        // Paths grow by whole points: in-handle, point, out-handle, appended at the end.
+        if (att->isWeighted()) {
+            setStatus("已绑定骨骼的路径不能加点，请先解除绑定");
+            return;
+        }
+        checkpoint();
+        Pose setup = makeSetupPose(sk_);
+        Vec2 p = setup.world[slot.bone].inverse().apply(toWorld(mouse));
+        Vec2 last = att->vertices.size() >= 2 ? att->vertices[att->vertices.size() - 2] : p - Vec2{60, 0};
+        Vec2 d = (p - last) * (1.0f / 3);
+        att->vertices.insert(att->vertices.end(), {p - d, p, p + d});
+        att->hullLength = (int)att->vertices.size();
+        afterTopologyChange(s, a);
+        sel_.vertices = {(int)att->vertices.size() - 2};
+        return;
+    }
     checkpoint();
     if (!att->isPolygon() && att->hullLength < 3 && !ensureHull(*att)) {
         setStatus("这个网格有多个外轮廓，无法加顶点：请先“自动生成网格”");
@@ -847,6 +998,24 @@ void Editor::meshDeleteSelectedVertices() {
     Attachment* att = selectedAttachment();
     if (!att || !att->hasVertices() || sel_.vertices.empty()) return;
     int s = sel_.slot, a = attachmentIndex(s, att);
+    if (att->type == AttachmentType::Path) {
+        // Remove whole path points; a path keeps at least two.
+        std::vector<int> points;
+        for (int v : sel_.vertices) points.push_back(v / 3);
+        std::sort(points.begin(), points.end());
+        points.erase(std::unique(points.begin(), points.end()), points.end());
+        int count = (int)att->vertexCount() / 3;
+        if (count - (int)points.size() < 2 || att->isWeighted()) {
+            setStatus("路径至少需要 2 个点（已绑定的路径不能删点）");
+            return;
+        }
+        checkpoint();
+        for (auto it = points.rbegin(); it != points.rend(); ++it)
+            att->vertices.erase(att->vertices.begin() + *it * 3, att->vertices.begin() + *it * 3 + 3);
+        att->hullLength = (int)att->vertices.size();
+        afterTopologyChange(s, a);
+        return;
+    }
     checkpoint();
     if (!removeMeshVertices(sk_, sk_.slots[s], *att, sel_.vertices)) {
         setStatus("外轮廓至少需要 3 个顶点");
@@ -1178,7 +1347,27 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
     undo_.clear();
     redo_.clear();
     dirty_ = false;
-    if (scenario == "clip") {
+    if (scenario == "ik" || scenario == "path") {
+        mode_ = Mode::Setup;
+        tool_ = Tool::Translate;
+        if (scenario == "ik") {
+            selectBone(low);
+            int c = createConstraint(ConstraintType::Ik);
+            int target = sk_.constraints[c].target;
+            sk_.bones[target].setup.x = 90;
+            sk_.bones[target].setup.y = 40;
+            selectConstraint(c);
+        } else {
+            selectBone(up);
+            int c = createConstraint(ConstraintType::Path);
+            Attachment& path = sk_.slots[sk_.constraints[c].target].attachments[0];
+            makePolygon(path, {{-160, -150}, {-120, -120}, {-80, -90}, {40, 0}, {60, 30}, {80, 60}, {200, 60}, {240, 120}, {280, 180}});
+            selectConstraint(c);
+        }
+        undo_.clear();
+        dirty_ = false;
+        updatePose();
+    } else if (scenario == "clip") {
         // A clipping slot below the arm that cuts it off with a slanted edge.
         createPolygonAttachment(0, AttachmentType::Clipping);
         Attachment& clip = sk_.slots[0].attachments[0];

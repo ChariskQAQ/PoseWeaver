@@ -53,12 +53,14 @@ void addSlot(std::vector<KeyMark>& out, const SlotTimeline& tl, Channel only = C
 }
 
 ImU32 maskColor(unsigned mask) {
-    for (int c = 0; c <= (int)Channel::Deform; ++c)
+    for (int c = 0; c <= (int)Channel::Constraint; ++c)
         if (mask == channelBit((Channel)c)) return channelColor((Channel)c);
     return theme::kMixed;
 }
 
-bool channelHasCurve(Channel ch) { return isBoneChannel(ch) || ch == Channel::Color || ch == Channel::Deform; }
+bool channelHasCurve(Channel ch) {
+    return isBoneChannel(ch) || ch == Channel::Color || ch == Channel::Deform || ch == Channel::Constraint;
+}
 
 void dashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
     float len = b.x - a.x;
@@ -71,6 +73,11 @@ bool sameValue(const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i)
         if (length(a[i] - b[i]) > 1e-4f) return false;
+    return true;
+}
+bool sameValue(const ConstraintValues& a, const ConstraintValues& b) {
+    for (int i = 0; i < 6; ++i)
+        if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
     return true;
 }
 bool sameValue(const Color& a, const Color& b) {
@@ -232,6 +239,8 @@ void Editor::drawDopesheet() {
     }
     if (!an->drawOrder.empty()) rows.push_back({SheetRow::Property, -1, Channel::DrawOrder});
     if (!an->events.empty()) rows.push_back({SheetRow::Property, -1, Channel::Event});
+    for (auto& [ci, keys] : an->constraints)
+        if (!keys.empty() && ci < (int)sk_.constraints.size()) rows.push_back({SheetRow::Property, ci, Channel::Constraint});
 
     auto rowMarks = [&](const SheetRow& r) {
         std::vector<KeyMark> m;
@@ -241,6 +250,7 @@ void Editor::drawDopesheet() {
             for (auto& [s, tl] : an->slots) addSlot(m, tl);
             addKeys(m, an->drawOrder, Channel::DrawOrder);
             addKeys(m, an->events, Channel::Event);
+            for (auto& [ci, keys] : an->constraints) addKeys(m, keys, Channel::Constraint);
             break;
         case SheetRow::Bone: {
             auto it = an->bones.find(r.index);
@@ -253,7 +263,10 @@ void Editor::drawDopesheet() {
             break;
         }
         case SheetRow::Property:
-            if (r.channel == Channel::DrawOrder) {
+            if (r.channel == Channel::Constraint) {
+                auto it = an->constraints.find(r.index);
+                if (it != an->constraints.end()) addKeys(m, it->second, Channel::Constraint);
+            } else if (r.channel == Channel::DrawOrder) {
                 addKeys(m, an->drawOrder, Channel::DrawOrder);
             } else if (r.channel == Channel::Event) {
                 addKeys(m, an->events, Channel::Event);
@@ -285,6 +298,7 @@ void Editor::drawDopesheet() {
                 for (Channel ch : kSlotChannels) out.push_back({s, ch, -1});
             out.push_back({-1, Channel::DrawOrder, -1});
             out.push_back({-1, Channel::Event, -1});
+            for (auto& [ci, keys] : an->constraints) out.push_back({ci, Channel::Constraint, -1});
             break;
         case SheetRow::Bone:
             for (Channel ch : kBoneChannels) out.push_back({r.index, ch, -1});
@@ -394,6 +408,8 @@ void Editor::drawDopesheet() {
                 selectBone(r.index);
                 setTool(r.channel == Channel::Rotate ? Tool::Rotate : r.channel == Channel::Translate ? Tool::Translate
                         : r.channel == Channel::Scale ? Tool::Scale : Tool::Shear);
+            } else if (r.kind == SheetRow::Property && r.channel == Channel::Constraint) {
+                selectConstraint(r.index);
             } else if (r.kind == SheetRow::Property && r.channel == Channel::Deform) {
                 selectAttachment(r.index, r.sub);
                 setTool(Tool::MeshEdit);
@@ -514,12 +530,13 @@ void Editor::drawDopesheet() {
             drawIcon(rdl, Icon::Slot, ImVec2(tx + ih * 1.4f, ty + ih * 0.5f), ih * 0.75f, iconColor(Icon::Slot));
             rdl->AddText(ImVec2(tx + ih * 2.2f, ty), textCol, sk_.slots[r.index].name.c_str());
         } else {
-            float indent = r.index >= 0 ? ih * 1.2f : 0;
+            float indent = r.index >= 0 && r.channel != Channel::Constraint ? ih * 1.2f : 0;
             Icon ic = channelIcon(r.channel);
             drawIcon(rdl, ic, ImVec2(tx + indent + ih * 0.5f, ty + ih * 0.5f), ih * 0.75f, channelColor(r.channel));
             std::string name = channelName(r.channel);
             if (r.channel == Channel::Deform && r.index >= 0 && r.sub >= 0 && r.sub < (int)sk_.slots[r.index].attachments.size())
                 name += " " + sk_.slots[r.index].attachments[r.sub].name;
+            if (r.channel == Channel::Constraint && r.index < (int)sk_.constraints.size()) name += " " + sk_.constraints[r.index].name;
             rdl->AddText(ImVec2(tx + indent + ih * 1.3f, ty), textCol, name.c_str());
         }
 
@@ -547,7 +564,10 @@ void Editor::drawDopesheet() {
                     }
                 }
             };
-            if (r.channel == Channel::Color || r.channel == Channel::Deform) {
+            if (r.channel == Channel::Constraint) {
+                auto it = an->constraints.find(r.index);
+                if (it != an->constraints.end()) draw(it->second);
+            } else if (r.channel == Channel::Color || r.channel == Channel::Deform) {
                 auto it = an->slots.find(r.index);
                 if (it != an->slots.end()) {
                     if (r.channel == Channel::Color) draw(it->second.color);

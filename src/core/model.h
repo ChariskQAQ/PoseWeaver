@@ -1,6 +1,7 @@
 #pragma once
 #include "core/math.h"
 
+#include <array>
 #include <map>
 #include <string>
 #include <vector>
@@ -39,7 +40,7 @@ struct Image {
     int width = 0, height = 0;
 };
 
-enum class AttachmentType { Region, Mesh, Clipping, BoundingBox };
+enum class AttachmentType { Region, Mesh, Clipping, BoundingBox, Path };
 
 struct VertexWeight {
     int bone = 0;
@@ -63,9 +64,14 @@ struct Attachment {
     std::vector<std::vector<VertexWeight>> weights;  // weighted: one list per vertex
     int hullLength = 0;  // mesh: the first hullLength vertices form the outline in order (0 = unknown)
     int endSlot = -1;    // clipping: last slot (index) that is clipped, -1 = all following slots
+    // Path: vertices are Bezier control points, three per path point: in-handle, point, out-handle.
+    bool closed = false;
 
     bool isWeighted() const { return !weights.empty(); }
-    bool isPolygon() const { return type == AttachmentType::Clipping || type == AttachmentType::BoundingBox; }
+    // Polygons and paths have no uvs or triangles (paths are edited like polygons).
+    bool isPolygon() const {
+        return type == AttachmentType::Clipping || type == AttachmentType::BoundingBox || type == AttachmentType::Path;
+    }
     bool hasVertices() const { return type != AttachmentType::Region; }
     size_t vertexCount() const { return isWeighted() ? weights.size() : vertices.size(); }
 };
@@ -144,7 +150,49 @@ struct SlotTimeline {
     }
 };
 
-enum class Channel { Rotate, Translate, Scale, Shear, Attachment, Color, DrawOrder, Event, Deform };
+// ---- constraints ----
+
+enum class ConstraintType { Ik, Transform, Path, Physics };
+enum class PathPositionMode { Fixed, Percent };
+enum class PathSpacingMode { Length, Fixed, Percent };
+enum class PathRotateMode { Tangent, Chain, ChainScale };
+
+// Keyable constraint values, meaning per type (see constraintValueNames):
+//   Ik:        mix, softness, bendDirection (stepped)
+//   Transform: mixRotate, mixX, mixY, mixScaleX, mixScaleY, mixShearY
+//   Path:      position, spacing, mixRotate, mixX, mixY
+//   Physics:   mix, wind, gravity
+using ConstraintValues = std::array<float, 6>;
+
+struct Constraint {
+    ConstraintType type = ConstraintType::Ik;
+    std::string name;
+    std::vector<int> bones;  // constrained bones (Ik: 1 or 2, parent first; Physics: 1)
+    int target = -1;         // Ik / Transform: target bone; Path: slot holding the path attachment
+    ConstraintValues values{1, 0, 1, 1, 1, 1};
+
+    // Ik
+    bool compress = false, stretch = false, uniform = false;
+    // Transform: offsets added to the target's values
+    float offsetRotation = 0, offsetX = 0, offsetY = 0, offsetScaleX = 0, offsetScaleY = 0, offsetShearY = 0;
+    bool local = false, relative = false;
+    // Path
+    PathPositionMode positionMode = PathPositionMode::Percent;
+    PathSpacingMode spacingMode = PathSpacingMode::Length;
+    PathRotateMode rotateMode = PathRotateMode::Tangent;
+    // Physics
+    bool physX = true, physY = true, physRotate = true;
+    float inertia = 1, strength = 100, damping = 0.25f, mass = 1, limit = 5000;  // damping 1 = no wobble
+};
+// Sensible default values for a new constraint of `type`.
+ConstraintValues defaultConstraintValues(ConstraintType type);
+// Number of keyable values for a type and their display names.
+int constraintValueCount(ConstraintType type);
+const char* constraintValueName(ConstraintType type, int index);
+
+struct ConstraintKey { float time = 0; ConstraintValues value{}; CurveShape curve; };
+
+enum class Channel { Rotate, Translate, Scale, Shear, Attachment, Color, DrawOrder, Event, Deform, Constraint };
 inline bool isBoneChannel(Channel c) { return c == Channel::Rotate || c == Channel::Translate || c == Channel::Scale || c == Channel::Shear; }
 inline bool isSlotChannel(Channel c) { return c == Channel::Attachment || c == Channel::Color || c == Channel::Deform; }
 
@@ -155,6 +203,7 @@ struct Animation {
     std::map<int, SlotTimeline> slots;
     std::vector<DrawOrderKey> drawOrder;
     std::vector<EventKey> events;  // sorted by time
+    std::map<int, std::vector<ConstraintKey>> constraints;  // per constraint index
 };
 
 struct Skeleton {
@@ -162,6 +211,7 @@ struct Skeleton {
     std::vector<Slot> slots;  // order = setup draw order (back to front)
     std::vector<Image> images;
     std::vector<EventDef> events;
+    std::vector<Constraint> constraints;  // applied in this order after the bone hierarchy
     std::vector<Animation> animations;
 
     int findBone(const std::string& name) const;
@@ -173,6 +223,7 @@ struct Skeleton {
     std::string uniqueBoneName(const std::string& base) const;
     std::string uniqueSlotName(const std::string& base) const;
     std::string uniqueEventName(const std::string& base) const;
+    std::string uniqueConstraintName(const std::string& base) const;
 
     int addBone(const std::string& name, int parent, const Transform& setup, float length);
     // Removes the bone, its descendants, their slots and every reference to them.
@@ -185,6 +236,10 @@ struct Skeleton {
     void swapSlots(int a, int b);  // swaps setup draw order positions
     // Removes an event definition and its keys.
     void removeEvent(int event);
+    // Removes a constraint and its keys.
+    void removeConstraint(int constraint);
+    // Swaps two constraints (application order), keeping their keys.
+    void swapConstraints(int a, int b);
     // Removes an attachment from a slot, fixing the active attachment, attachment keys and deform keys.
     void removeAttachment(int slot, int attachment);
     // Drops deform keys whose vertex count no longer matches the attachment (after topology edits).
@@ -202,6 +257,7 @@ void setDrawOrderKey(Animation& anim, float time, const std::vector<int>& order)
 // Events can share a time only if they are different events; same event at same time replaces.
 void setEventKey(Animation& anim, float time, int event, const EventDef& def);
 void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets);
+void setConstraintKey(Animation& anim, int constraint, float time, const ConstraintValues& values);
 
 // `index` = bone for bone channels, slot for slot channels, event for Event, ignored for DrawOrder.
 // `sub` = attachment index for Deform.

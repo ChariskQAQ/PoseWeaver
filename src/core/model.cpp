@@ -113,6 +113,49 @@ std::string Skeleton::uniqueSlotName(const std::string& base) const {
     });
 }
 
+std::string Skeleton::uniqueConstraintName(const std::string& base) const {
+    return uniqueName(base, [&](const std::string& n) {
+        for (auto& c : constraints)
+            if (c.name == n) return true;
+        return false;
+    });
+}
+
+ConstraintValues defaultConstraintValues(ConstraintType type) {
+    switch (type) {
+    case ConstraintType::Ik: return {1, 0, 1, 0, 0, 0};
+    case ConstraintType::Transform: return {1, 1, 1, 1, 1, 1};
+    case ConstraintType::Path: return {0, 0, 1, 1, 1, 0};
+    case ConstraintType::Physics: return {1, 0, 0, 0, 0, 0};
+    }
+    return {};
+}
+
+int constraintValueCount(ConstraintType type) {
+    switch (type) {
+    case ConstraintType::Ik: return 3;
+    case ConstraintType::Transform: return 6;
+    case ConstraintType::Path: return 5;
+    case ConstraintType::Physics: return 3;
+    }
+    return 0;
+}
+
+const char* constraintValueName(ConstraintType type, int i) {
+    static const char* ik[] = {"混合", "软化", "弯曲方向"};
+    static const char* tr[] = {"旋转混合", "X 混合", "Y 混合", "缩放 X 混合", "缩放 Y 混合", "斜切混合"};
+    static const char* path[] = {"位置", "间距", "旋转混合", "X 混合", "Y 混合"};
+    static const char* phys[] = {"混合", "风", "重力"};
+    if (i < 0 || i >= constraintValueCount(type)) return "";
+    switch (type) {
+    case ConstraintType::Ik: return ik[i];
+    case ConstraintType::Transform: return tr[i];
+    case ConstraintType::Path: return path[i];
+    case ConstraintType::Physics: return phys[i];
+    }
+    return "";
+}
+
 std::string Skeleton::uniqueEventName(const std::string& base) const {
     return uniqueName(base, [&](const std::string& n) {
         for (auto& e : events)
@@ -148,6 +191,12 @@ static void remapSlots(std::vector<Animation>& animations, const std::vector<int
 }
 
 // Clipping attachments reference their end slot by index.
+static void remapPathTargets(std::vector<Constraint>& constraints, const std::vector<int>& slotRemap) {
+    for (auto& c : constraints)
+        if (c.type == ConstraintType::Path && c.target >= 0)
+            c.target = c.target < (int)slotRemap.size() ? slotRemap[c.target] : -1;
+}
+
 static void remapClipEnds(std::vector<Slot>& slots, const std::vector<int>& slotRemap) {
     for (auto& s : slots)
         for (auto& a : s.attachments)
@@ -218,6 +267,48 @@ void Skeleton::removeBone(int bone) {
     }
     remapSlots(animations, slotRemap);
     remapClipEnds(slots, slotRemap);
+
+    for (int c = (int)constraints.size() - 1; c >= 0; --c) {
+        Constraint& con = constraints[c];
+        std::vector<int> kept;
+        for (int b : con.bones)
+            if (b < (int)remap.size() && remap[b] >= 0) kept.push_back(remap[b]);
+        con.bones = kept;
+        if (con.type == ConstraintType::Path) {
+            con.target = con.target >= 0 && con.target < (int)slotRemap.size() ? slotRemap[con.target] : -1;
+        } else if (con.target >= 0) {
+            con.target = con.target < (int)remap.size() ? remap[con.target] : -1;
+        }
+        bool needsTarget = con.type != ConstraintType::Physics;
+        if (con.bones.empty() || (needsTarget && con.target < 0)) removeConstraint(c);
+    }
+}
+
+void Skeleton::removeConstraint(int c) {
+    if (c < 0 || c >= (int)constraints.size()) return;
+    constraints.erase(constraints.begin() + c);
+    for (auto& an : animations) {
+        std::map<int, std::vector<ConstraintKey>> keys;
+        for (auto& [i, k] : an.constraints)
+            if (i != c) keys[i > c ? i - 1 : i] = std::move(k);
+        an.constraints = std::move(keys);
+    }
+}
+
+void Skeleton::swapConstraints(int a, int b) {
+    if (a < 0 || b < 0 || a >= (int)constraints.size() || b >= (int)constraints.size() || a == b) return;
+    std::swap(constraints[a], constraints[b]);
+    for (auto& an : animations) {
+        auto ia = an.constraints.find(a), ib = an.constraints.find(b);
+        std::vector<ConstraintKey> ka, kb;
+        bool ha = ia != an.constraints.end(), hb = ib != an.constraints.end();
+        if (ha) ka = std::move(ia->second);
+        if (hb) kb = std::move(ib->second);
+        an.constraints.erase(a);
+        an.constraints.erase(b);
+        if (ha) an.constraints[b] = std::move(ka);
+        if (hb) an.constraints[a] = std::move(kb);
+    }
 }
 
 bool Skeleton::reparentBone(int bone, int newParent) {
@@ -237,6 +328,7 @@ void Skeleton::removeSlot(int slot) {
     slots.erase(slots.begin() + slot);
     remapSlots(animations, slotRemap);
     remapClipEnds(slots, slotRemap);
+    remapPathTargets(constraints, slotRemap);
 }
 
 void Skeleton::swapSlots(int a, int b) {
@@ -246,6 +338,7 @@ void Skeleton::swapSlots(int a, int b) {
     for (int i = 0; i < (int)slots.size(); ++i) slotRemap[i] = i == a ? b : (i == b ? a : i);
     remapSlots(animations, slotRemap);
     remapClipEnds(slots, slotRemap);
+    remapPathTargets(constraints, slotRemap);
 }
 
 void Skeleton::removeAttachment(int slot, int attachment) {
@@ -358,6 +451,10 @@ void setDeformKey(Animation& anim, int slot, int attachment, float time, const s
     upsert(anim.slots[slot].deform[attachment], time, offsets);
 }
 
+void setConstraintKey(Animation& anim, int constraint, float time, const ConstraintValues& values) {
+    upsert(anim.constraints[constraint], time, values);
+}
+
 void setDrawOrderKey(Animation& anim, float time, const std::vector<int>& order) {
     if (DrawOrderKey* k = findAt(anim.drawOrder, time)) {
         k->order = order;
@@ -380,6 +477,13 @@ void setEventKey(Animation& anim, float time, int event, const EventDef& def) {
 
 bool removeKey(Animation& anim, int index, Channel ch, float time, int sub) {
     switch (ch) {
+    case Channel::Constraint: {
+        auto it = anim.constraints.find(index);
+        if (it == anim.constraints.end()) return false;
+        bool ok = eraseAt(it->second, time);
+        if (it->second.empty()) anim.constraints.erase(it);
+        return ok;
+    }
     case Channel::Deform: {
         auto it = anim.slots.find(index);
         if (it == anim.slots.end()) return false;
@@ -425,6 +529,10 @@ bool removeKey(Animation& anim, int index, Channel ch, float time, int sub) {
 
 bool hasKey(const Animation& anim, int index, Channel ch, float time, int sub) {
     switch (ch) {
+    case Channel::Constraint: {
+        auto it = anim.constraints.find(index);
+        return it != anim.constraints.end() && contains(it->second, time);
+    }
     case Channel::Deform: {
         auto it = anim.slots.find(index);
         if (it == anim.slots.end()) return false;
@@ -457,6 +565,12 @@ bool hasKey(const Animation& anim, int index, Channel ch, float time, int sub) {
 
 // Pointer to the curve of a curve-carrying key, or null.
 static CurveShape* curveAt(Animation& anim, int index, Channel ch, float time, int sub) {
+    if (ch == Channel::Constraint) {
+        auto it = anim.constraints.find(index);
+        if (it == anim.constraints.end()) return nullptr;
+        ConstraintKey* k = findAt(it->second, time);
+        return k ? &k->curve : nullptr;
+    }
     if (ch == Channel::Deform) {
         auto it = anim.slots.find(index);
         if (it == anim.slots.end()) return nullptr;
@@ -548,6 +662,7 @@ void moveKeys(Animation& anim, float from, float to) {
     for (auto& [i, tl] : anim.slots) shiftSlot(tl, from, to);
     shiftKey(anim.drawOrder, from, to);
     shiftEvents(anim, -1, from, to);
+    for (auto& [c, keys] : anim.constraints) shiftKey(keys, from, to);
 }
 
 void moveRowKeys(Animation& anim, bool isSlot, int index, float from, float to) {
@@ -562,6 +677,11 @@ void moveRowKeys(Animation& anim, bool isSlot, int index, float from, float to) 
 
 void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to, int sub) {
     switch (ch) {
+    case Channel::Constraint: {
+        auto it = anim.constraints.find(index);
+        if (it != anim.constraints.end()) shiftKey(it->second, from, to);
+        return;
+    }
     case Channel::Deform: {
         auto it = anim.slots.find(index);
         if (it == anim.slots.end()) return;
@@ -616,6 +736,8 @@ std::vector<float> keyTimes(const Animation& anim) {
     for (auto& [i, tl] : anim.slots) addTimes(t, tl);
     for (auto& k : anim.drawOrder) t.push_back(k.time);
     for (auto& k : anim.events) t.push_back(k.time);
+    for (auto& [c, keys] : anim.constraints)
+        for (auto& k : keys) t.push_back(k.time);
     uniqueSorted(t);
     return t;
 }

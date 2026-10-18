@@ -1,6 +1,7 @@
 #include "editor/editor.h"
 
 #include "core/clipping.h"
+#include "core/constraints.h"
 #include "core/mesh_tools.h"
 #include "editor/theme.h"
 
@@ -360,10 +361,17 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         Attachment* att = selectedAttachment();
         if (!att) break;
         ensureCheckpoint();
+        // Moving a path point carries its two handles along.
+        std::vector<int> moving = sel_.vertices;
+        if (att->type == AttachmentType::Path)
+            for (int v : sel_.vertices)
+                if (v % 3 == 1)
+                    for (int h : {v - 1, v + 1})
+                        if (h >= 0 && std::find(moving.begin(), moving.end(), h) == moving.end()) moving.push_back(h);
         if (mode_ == Mode::Animate) {
             // Deform key: offsets in each vertex's own deform space.
             std::vector<Vec2> offsets = drag_.startOffsets;
-            for (int v : sel_.vertices)
+            for (int v : moving)
                 if (v < (int)offsets.size() && v < (int)drag_.deformBases.size())
                     offsets[v] = drag_.startOffsets[v] + drag_.deformBases[v].applyVector(worldDelta);
             if (!currentAnimation()) createAnimation();
@@ -374,7 +382,7 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         const Slot& slot = sk_.slots[sel_.slot];
         Affine toLocal = setup.world[slot.bone].inverse();
         bool uvFollows = !meshDeformMode_ && att->type == AttachmentType::Mesh && att->image >= 0 && att->image < (int)sk_.images.size();
-        for (int v : sel_.vertices) {
+        for (int v : moving) {
             if (v >= (int)drag_.startVertices.size()) continue;
             Vec2 target = drag_.startVertices[v] + worldDelta;
             setVertexSetupWorld(sk_, setup, slot, *att, v, target);
@@ -472,6 +480,16 @@ void Editor::drawSlots(ImDrawList* dl) {
                 clip = clipTrianglesOf(poly);
                 clipEnd = att.endSlot;
             }
+            if (att.type == AttachmentType::Path) {
+                if (!view_.polygonsVisible) continue;
+                bool selected = s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
+                std::vector<ImVec2> sp;
+                for (Vec2 p : samplePath(buildPathCurve(poly, att.closed))) sp.push_back(toScreen(p));
+                if (sp.size() >= 2)
+                    dl->AddPolyline(sp.data(), (int)sp.size(), selected ? theme::kSelect : IM_COL32(255, 150, 60, 230),
+                                    att.closed ? ImDrawFlags_Closed : 0, (selected ? 2.4f : 1.8f) * uiScale_);
+                continue;
+            }
             if (view_.polygonsVisible && poly.size() >= 2) {
                 bool selected = s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
                 std::vector<ImVec2> sp;
@@ -533,6 +551,22 @@ void Editor::drawMeshOverlay(ImDrawList* dl) {
         ImVec2 p[3] = {sp[att->triangles[t]], sp[att->triangles[t + 1]], sp[att->triangles[t + 2]]};
         dl->AddPolyline(p, 3, lineCol, ImDrawFlags_Closed, 1.0f);
     }
+    if (att->type == AttachmentType::Path) {
+        // Path: handle lines from each point to its in/out handles; points drawn as squares.
+        for (size_t i = 0; i + 2 < sp.size(); i += 3) {
+            dl->AddLine(sp[i], sp[i + 1], IM_COL32(255, 200, 120, 200), 1.2f);
+            dl->AddLine(sp[i + 1], sp[i + 2], IM_COL32(255, 200, 120, 200), 1.2f);
+        }
+        if (!editing) return;
+        for (size_t v = 0; v < sp.size(); ++v) {
+            bool sel = std::find(sel_.vertices.begin(), sel_.vertices.end(), (int)v) != sel_.vertices.end();
+            ImU32 col = sel ? theme::kSelect : IM_COL32(255, 255, 255, 230);
+            float r = (v % 3 == 1 ? 4.5f : 3.0f) * uiScale_;
+            if (v % 3 == 1) dl->AddRectFilled(sp[v] - ImVec2(r, r), sp[v] + ImVec2(r, r), col);
+            else dl->AddCircleFilled(sp[v], r, col);
+        }
+        return;
+    }
     // Outline (hull / polygon) drawn thicker.
     int hull = att->isPolygon() ? (int)sp.size() : att->hullLength;
     if (hull >= 2 && hull <= (int)sp.size())
@@ -588,6 +622,65 @@ void Editor::drawBones(ImDrawList* dl) {
         }
         if (selected && overBoneTip(ImGui::GetIO().MousePos))
             dl->AddCircle(toScreen(boneTip(b, pose_.world[i])), 6.0f * u, theme::kAnimEnd, 0, 2.0f);
+    }
+}
+
+static void dashed(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float thickness) {
+    float len = dist(a, b);
+    if (len < 1) return;
+    ImVec2 d = (b - a) * (1.0f / len);
+    for (float x = 0; x < len; x += 8) {
+        float e = std::min(x + 4, len);
+        dl->AddLine(a + d * x, a + d * e, col, thickness);
+    }
+}
+
+void Editor::drawConstraints(ImDrawList* dl) {
+    if (!view_.bonesVisible) return;
+    const float u = uiScale_;
+    for (int i = 0; i < (int)sk_.constraints.size(); ++i) {
+        const Constraint& c = sk_.constraints[i];
+        bool selected = sel_.kind == Selection::Constraint && sel_.index == i;
+        bool related = selected;
+        for (int b : c.bones) related |= sel_.bone == b && sel_.kind == Selection::Bone;
+        if (c.type != ConstraintType::Path) related |= sel_.bone == c.target && sel_.kind == Selection::Bone;
+        switch (c.type) {
+        case ConstraintType::Ik: {
+            if (c.target < 0 || c.target >= (int)pose_.world.size()) break;
+            ImVec2 t = toScreen(pose_.world[c.target].origin());
+            ImU32 col = selected ? theme::kSelect : IM_COL32(240, 90, 90, 255);
+            dl->AddCircle(t, 9 * u, col, 0, 2.0f);
+            dl->AddLine(t - ImVec2(13 * u, 0), t + ImVec2(13 * u, 0), col, 1.5f);
+            dl->AddLine(t - ImVec2(0, 13 * u), t + ImVec2(0, 13 * u), col, 1.5f);
+            if (related && !c.bones.empty()) {
+                int last = c.bones.back();
+                dashed(dl, toScreen(boneTip(sk_.bones[last], pose_.world[last])), t, col, 1.5f);
+            }
+            break;
+        }
+        case ConstraintType::Transform: {
+            if (!related || c.target < 0 || c.target >= (int)pose_.world.size()) break;
+            ImVec2 t = toScreen(pose_.world[c.target].origin());
+            for (int b : c.bones) dashed(dl, toScreen(pose_.world[b].origin()), t, IM_COL32(240, 200, 80, 230), 1.5f);
+            dl->AddRect(t - ImVec2(6 * u, 6 * u), t + ImVec2(6 * u, 6 * u), IM_COL32(240, 200, 80, 255), 0, 0, 2.0f);
+            break;
+        }
+        case ConstraintType::Path: {
+            if (!related) break;
+            for (int b : c.bones) dl->AddCircle(toScreen(pose_.world[b].origin()), 6 * u, IM_COL32(255, 150, 60, 255), 0, 2.0f);
+            break;
+        }
+        case ConstraintType::Physics: {
+            if (c.bones.empty()) break;
+            int b = c.bones[0];
+            ImVec2 tip = toScreen(boneTip(sk_.bones[b], pose_.world[b]));
+            ImU32 col = related ? theme::kSelect : IM_COL32(90, 210, 240, 220);
+            ImVec2 pts[7];
+            for (int k = 0; k < 7; ++k) pts[k] = tip + ImVec2((k - 3) * 3.0f * u, (k % 2 ? -4.0f : 4.0f) * u + 12 * u);
+            dl->AddPolyline(pts, 7, col, 0, 1.6f);
+            break;
+        }
+        }
     }
 }
 
@@ -663,6 +756,7 @@ void Editor::drawViewport() {
     drawSlots(dl);
     drawMeshOverlay(dl);
     drawBones(dl);
+    drawConstraints(dl);
 
     if (drag_.kind == Drag::CreateBone) {
         ImVec2 end = drag_.moved ? mouse : drag_.startScreen;

@@ -1,5 +1,6 @@
 // Minimal self-checking tests for rigcore (no framework dependency).
 #include "core/clipping.h"
+#include "core/constraints.h"
 #include "core/mesh_tools.h"
 #include "core/pose.h"
 #include "core/serialize.h"
@@ -507,6 +508,184 @@ static void testPhase2RoundTrip() {
     CHECK(keyCurve(loaded.animations[0], 0, Channel::Deform, 0.5f, 0)->type == Curve::Stepped);
 }
 
+// Root at origin, arm pointing +x: upper (0..100), lower (100..200), plus a free target bone.
+static Skeleton makeIkRig(Vec2 target) {
+    Skeleton sk;
+    int root = sk.addBone("root", -1, {}, 0);
+    int upper = sk.addBone("upper", root, {}, 100);
+    Transform lt;
+    lt.x = 100;
+    sk.addBone("lower", upper, lt, 100);
+    Transform tt;
+    tt.x = target.x;
+    tt.y = target.y;
+    sk.addBone("target", root, tt, 0);
+    return sk;
+}
+
+static void testIk() {
+    // Two-bone IK reaches a reachable target and the bend direction picks the side.
+    Skeleton sk = makeIkRig({120, 80});
+    Constraint ik;
+    ik.type = ConstraintType::Ik;
+    ik.bones = {1, 2};
+    ik.target = 3;
+    ik.values = defaultConstraintValues(ConstraintType::Ik);
+    sk.constraints.push_back(ik);
+    Pose p = makeSetupPose(sk);
+    CHECK(near(boneTip(sk.bones[2], p.world[2]), {120, 80}, 0.05f));
+    Vec2 elbowUp = p.world[2].origin();
+    sk.constraints[0].values[2] = -1;
+    p = makeSetupPose(sk);
+    CHECK(near(boneTip(sk.bones[2], p.world[2]), {120, 80}, 0.05f));
+    CHECK(length(p.world[2].origin() - elbowUp) > 10);
+    // Local transforms (what gets keyed) are untouched; only `applied` changes.
+    CHECK(near(p.local[1].rotation, 0) && !near(p.applied[1].rotation, 0));
+    // Out of reach: the chain points straight at the target.
+    sk.bones[3].setup = {};
+    sk.bones[3].setup.y = 500;
+    p = makeSetupPose(sk);
+    CHECK(near(p.world[1].rotationDeg(), 90, 0.5f) && near(p.world[2].rotationDeg(), 90, 0.5f));
+    // Stretch reaches it.
+    sk.constraints[0].stretch = true;
+    p = makeSetupPose(sk);
+    CHECK(near(boneTip(sk.bones[2], p.world[2]), {0, 500}, 0.5f));
+    // One bone, half mix: half way between 0 and 90 degrees.
+    Skeleton one = makeIkRig({0, 100});
+    Constraint ik1 = ik;
+    ik1.bones = {2};
+    ik1.values[0] = 0.5f;
+    one.constraints.push_back(ik1);
+    p = makeSetupPose(one);
+    float full = radToDeg(std::atan2(100.0f, -100.0f));
+    CHECK(near(p.world[2].rotationDeg(), full * 0.5f, 0.5f));
+    // Mix animation key.
+    Animation an;
+    setConstraintKey(an, 0, 0, {0, 0, 1, 0, 0, 0});
+    setConstraintKey(an, 0, 1, {1, 0, 1, 0, 0, 0});
+    one.animations.push_back(an);
+    p = makeAnimatedPose(one, &one.animations[0], 0.5f);
+    CHECK(near(p.constraints[0][0], 0.5f));
+}
+
+static void testTransformConstraint() {
+    Skeleton sk = makeIkRig({50, 60});
+    sk.bones[3].setup.rotation = 30;
+    sk.bones[3].setup.scaleX = 2;
+    Constraint tc;
+    tc.type = ConstraintType::Transform;
+    tc.bones = {2};
+    tc.target = 3;
+    tc.values = defaultConstraintValues(ConstraintType::Transform);
+    tc.offsetRotation = 10;
+    sk.constraints.push_back(tc);
+    Pose p = makeSetupPose(sk);
+    CHECK(near(p.world[2].origin(), {50, 60}));
+    CHECK(near(p.world[2].rotationDeg(), 40));
+    CHECK(near(decompose(p.world[2]).scaleX, 2));
+    // Only rotation, half mix.
+    sk.constraints[0].values = {0.5f, 0, 0, 0, 0, 0};
+    p = makeSetupPose(sk);
+    CHECK(near(p.world[2].origin(), {100, 0}) && near(p.world[2].rotationDeg(), 20));
+}
+
+static void testPathConstraint() {
+    // A straight path from (0,0) to (300,0); three 100-long bones follow it.
+    Skeleton sk;
+    int root = sk.addBone("root", -1, {}, 0);
+    int a = sk.addBone("a", root, {}, 100);
+    Transform t;
+    t.rotation = 45;
+    int b = sk.addBone("b", a, t, 100);
+    int c = sk.addBone("c", b, t, 100);
+    Slot slot;
+    slot.name = "path";
+    slot.bone = root;
+    Attachment path;
+    path.type = AttachmentType::Path;
+    makePolygon(path, {{-50, 0}, {0, 0}, {50, 0}, {250, 0}, {300, 0}, {350, 0}});
+    slot.attachments.push_back(path);
+    slot.activeAttachment = 0;
+    sk.slots.push_back(slot);
+    Constraint pc;
+    pc.type = ConstraintType::Path;
+    pc.bones = {a, b, c};
+    pc.target = 0;
+    pc.values = defaultConstraintValues(ConstraintType::Path);
+    sk.constraints.push_back(pc);
+    Pose p = makeSetupPose(sk);
+    CHECK(near(p.world[a].origin(), {0, 0}, 0.5f) && near(p.world[b].origin(), {100, 0}, 0.5f) && near(p.world[c].origin(), {200, 0}, 0.5f));
+    CHECK(near(p.world[b].rotationDeg(), 0, 0.5f) && near(p.world[c].rotationDeg(), 0, 0.5f));
+    // Position 50% moves the chain along.
+    sk.constraints[0].values[0] = 0.5f;
+    p = makeSetupPose(sk);
+    CHECK(near(p.world[a].origin(), {150, 0}, 0.5f));
+    PathCurve curve = buildPathCurve({{-50, 0}, {0, 0}, {50, 0}, {250, 0}, {300, 0}, {350, 0}}, false);
+    CHECK(near(curve.total, 300, 0.5f));
+}
+
+static void testPhysics() {
+    Skeleton sk;
+    int root = sk.addBone("root", -1, {}, 0);
+    int hair = sk.addBone("hair", root, {}, 50);
+    Constraint ph;
+    ph.type = ConstraintType::Physics;
+    ph.bones = {hair};
+    ph.values = defaultConstraintValues(ConstraintType::Physics);
+    sk.constraints.push_back(ph);
+    PhysicsState state;
+    Pose p = makeSetupPose(sk);
+    applyPhysics(sk, p, state, 1 / 60.0f);
+    CHECK(near(p.world[hair].origin(), {0, 0}));
+    // Move the root suddenly: the bone lags behind, then settles back.
+    sk.bones[root].setup.x = 100;
+    p = makeSetupPose(sk);
+    applyPhysics(sk, p, state, 1 / 60.0f);
+    CHECK(p.world[hair].origin().x < 99);
+    for (int i = 0; i < 600; ++i) {
+        p = makeSetupPose(sk);
+        applyPhysics(sk, p, state, 1 / 60.0f);
+    }
+    CHECK(near(p.world[hair].origin(), {100, 0}, 0.5f));
+    // Gravity pulls it down while active.
+    sk.constraints[0].values[2] = 500;
+    for (int i = 0; i < 120; ++i) {
+        p = makeSetupPose(sk);
+        applyPhysics(sk, p, state, 1 / 60.0f);
+    }
+    CHECK(p.world[hair].origin().y < -1);
+}
+
+static void testConstraintBookkeeping() {
+    Skeleton sk = makeIkRig({120, 80});
+    Constraint ik;
+    ik.name = "ik";
+    ik.bones = {1, 2};
+    ik.target = 3;
+    sk.constraints.push_back(ik);
+    Constraint tc;
+    tc.name = "tc";
+    tc.type = ConstraintType::Transform;
+    tc.bones = {2};
+    tc.target = 1;
+    sk.constraints.push_back(tc);
+    Animation an;
+    setConstraintKey(an, 1, 0.5f, {1, 1, 1, 1, 1, 1});
+    sk.animations.push_back(an);
+    sk.swapConstraints(0, 1);
+    CHECK(sk.constraints[0].name == "tc" && sk.animations[0].constraints.count(0));
+    std::string text = toJson(sk);
+    Skeleton loaded;
+    std::string err;
+    CHECK(fromJson(text, loaded, &err));
+    CHECK(toJson(loaded) == text);
+    // Removing the IK target bone removes the IK constraint; the transform one survives.
+    sk.removeBone(3);
+    CHECK(sk.constraints.size() == 1 && sk.constraints[0].name == "tc");
+    sk.removeBone(1);  // takes upper and lower with it
+    CHECK(sk.constraints.empty() && sk.animations[0].constraints.empty());
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -559,6 +738,11 @@ int main() {
     testWeightTools();
     testClipping();
     testPhase2RoundTrip();
+    testIk();
+    testTransformConstraint();
+    testPathConstraint();
+    testPhysics();
+    testConstraintBookkeeping();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

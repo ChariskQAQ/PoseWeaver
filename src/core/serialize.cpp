@@ -15,13 +15,35 @@ namespace rig {
 //   1  bones, slots, region/mesh attachments, rotate/translate/scale + attachment keys
 //   2  shear, Bezier curves, slot colour keys, draw order keys, events
 //   3  mesh hull, clipping / bounding box attachments, deform keys
-static constexpr int kFormatVersion = 3;
+//   4  constraints (IK, transform, path, physics), path attachments, constraint keys
+static constexpr int kFormatVersion = 4;
+
+static const char* constraintTypeName(ConstraintType t) {
+    switch (t) {
+    case ConstraintType::Transform: return "transform";
+    case ConstraintType::Path: return "path";
+    case ConstraintType::Physics: return "physics";
+    default: return "ik";
+    }
+}
+static ConstraintType constraintTypeFrom(const std::string& s) {
+    if (s == "transform") return ConstraintType::Transform;
+    if (s == "path") return ConstraintType::Path;
+    if (s == "physics") return ConstraintType::Physics;
+    return ConstraintType::Ik;
+}
+static json valuesJson(const ConstraintValues& v) { return json::array({v[0], v[1], v[2], v[3], v[4], v[5]}); }
+static ConstraintValues valuesFrom(const json& j, ConstraintValues def) {
+    for (int i = 0; i < 6 && i < (int)j.size(); ++i) def[i] = j[i].get<float>();
+    return def;
+}
 
 static const char* typeName(AttachmentType t) {
     switch (t) {
     case AttachmentType::Mesh: return "mesh";
     case AttachmentType::Clipping: return "clipping";
     case AttachmentType::BoundingBox: return "boundingbox";
+    case AttachmentType::Path: return "path";
     default: return "region";
     }
 }
@@ -29,6 +51,7 @@ static AttachmentType typeFrom(const std::string& s) {
     if (s == "mesh") return AttachmentType::Mesh;
     if (s == "clipping") return AttachmentType::Clipping;
     if (s == "boundingbox") return AttachmentType::BoundingBox;
+    if (s == "path") return AttachmentType::Path;
     return AttachmentType::Region;
 }
 
@@ -133,6 +156,7 @@ std::string toJson(const Skeleton& sk, int indent) {
                     if (a.hullLength > 0) ja["hull"] = a.hullLength;
                 }
                 if (a.type == AttachmentType::Clipping) ja["end"] = a.endSlot;
+                if (a.type == AttachmentType::Path) ja["closed"] = a.closed;
                 if (a.isWeighted()) {
                     json ws = json::array();
                     for (auto& list : a.weights) {
@@ -163,6 +187,36 @@ std::string toJson(const Skeleton& sk, int indent) {
         events.push_back(je);
     }
     root["events"] = events;
+
+    json constraints = json::array();
+    for (auto& c : sk.constraints) {
+        json jc{{"name", c.name}, {"type", constraintTypeName(c.type)}, {"bones", c.bones}, {"target", c.target},
+                {"values", valuesJson(c.values)}};
+        switch (c.type) {
+        case ConstraintType::Ik:
+            jc["compress"] = c.compress;
+            jc["stretch"] = c.stretch;
+            jc["uniform"] = c.uniform;
+            break;
+        case ConstraintType::Transform:
+            jc["offset"] = {c.offsetRotation, c.offsetX, c.offsetY, c.offsetScaleX, c.offsetScaleY, c.offsetShearY};
+            jc["local"] = c.local;
+            jc["relative"] = c.relative;
+            break;
+        case ConstraintType::Path:
+            jc["positionMode"] = (int)c.positionMode;
+            jc["spacingMode"] = (int)c.spacingMode;
+            jc["rotateMode"] = (int)c.rotateMode;
+            jc["offsetRotation"] = c.offsetRotation;
+            break;
+        case ConstraintType::Physics:
+            jc["axes"] = {c.physX, c.physY, c.physRotate};
+            jc["physics"] = {c.inertia, c.strength, c.damping, c.mass, c.limit};
+            break;
+        }
+        constraints.push_back(jc);
+    }
+    root["constraints"] = constraints;
 
     json anims = json::array();
     for (auto& an : sk.animations) {
@@ -205,6 +259,15 @@ std::string toJson(const Skeleton& sk, int indent) {
             json dk = json::array();
             for (auto& k : an.drawOrder) dk.push_back({{"time", k.time}, {"order", k.order}});
             ja["drawOrder"] = dk;
+        }
+        if (!an.constraints.empty()) {
+            json ck = json::array();
+            for (auto& [ci, keys] : an.constraints) {
+                json kj = json::array();
+                for (auto& k : keys) kj.push_back({{"time", k.time}, {"values", valuesJson(k.value)}, {"curve", curveJson(k.curve)}});
+                ck.push_back({{"constraint", ci}, {"keys", kj}});
+            }
+            ja["constraints"] = ck;
         }
         if (!an.events.empty()) {
             json ek = json::array();
@@ -268,6 +331,16 @@ static bool validate(const Skeleton& sk, std::string* error) {
         }
         for (auto& k : an.events)
             if (k.event < 0 || k.event >= ne) return fail("animation " + an.name + ": invalid event");
+        for (auto& [ci, keys] : an.constraints)
+            if (ci < 0 || ci >= (int)sk.constraints.size()) return fail("animation " + an.name + ": invalid constraint");
+    }
+    for (auto& c : sk.constraints) {
+        for (int b : c.bones)
+            if (b < 0 || b >= nb) return fail("constraint " + c.name + ": invalid bone");
+        if (c.bones.empty()) return fail("constraint " + c.name + ": no bones");
+        if (c.type == ConstraintType::Path ? (c.target < 0 || c.target >= ns)
+                                           : (c.type != ConstraintType::Physics && (c.target < 0 || c.target >= nb)))
+            return fail("constraint " + c.name + ": invalid target");
     }
     return true;
 }
@@ -317,6 +390,7 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                         a.hullLength = ja.value("hull", 0);
                     }
                     a.endSlot = ja.value("end", -1);
+                    a.closed = ja.value("closed", false);
                     if (ja.contains("weights")) {
                         for (auto& jl : ja["weights"]) {
                             std::vector<VertexWeight> list;
@@ -353,6 +427,48 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                 sk.events.push_back(e);
             }
         }
+        if (root.contains("constraints")) {
+            for (auto& jc : root["constraints"]) {
+                Constraint c;
+                c.name = jc.at("name").get<std::string>();
+                c.type = constraintTypeFrom(jc.value("type", std::string("ik")));
+                c.bones = jc.at("bones").get<std::vector<int>>();
+                c.target = jc.value("target", -1);
+                c.values = valuesFrom(jc.value("values", json::array()), defaultConstraintValues(c.type));
+                c.compress = jc.value("compress", false);
+                c.stretch = jc.value("stretch", false);
+                c.uniform = jc.value("uniform", false);
+                if (jc.contains("offset") && jc["offset"].size() == 6) {
+                    const json& o = jc["offset"];
+                    c.offsetRotation = o[0];
+                    c.offsetX = o[1];
+                    c.offsetY = o[2];
+                    c.offsetScaleX = o[3];
+                    c.offsetScaleY = o[4];
+                    c.offsetShearY = o[5];
+                }
+                c.local = jc.value("local", false);
+                c.relative = jc.value("relative", false);
+                c.positionMode = (PathPositionMode)jc.value("positionMode", (int)PathPositionMode::Percent);
+                c.spacingMode = (PathSpacingMode)jc.value("spacingMode", (int)PathSpacingMode::Length);
+                c.rotateMode = (PathRotateMode)jc.value("rotateMode", (int)PathRotateMode::Tangent);
+                if (c.type == ConstraintType::Path) c.offsetRotation = jc.value("offsetRotation", 0.0f);
+                if (jc.contains("axes") && jc["axes"].size() == 3) {
+                    c.physX = jc["axes"][0];
+                    c.physY = jc["axes"][1];
+                    c.physRotate = jc["axes"][2];
+                }
+                if (jc.contains("physics") && jc["physics"].size() == 5) {
+                    const json& ph = jc["physics"];
+                    c.inertia = ph[0];
+                    c.strength = ph[1];
+                    c.damping = ph[2];
+                    c.mass = ph[3];
+                    c.limit = ph[4];
+                }
+                sk.constraints.push_back(c);
+            }
+        }
         for (auto& ja : root.at("animations")) {
             Animation an;
             an.name = ja.at("name").get<std::string>();
@@ -379,6 +495,11 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
             }
             if (ja.contains("drawOrder"))
                 for (auto& k : ja["drawOrder"]) an.drawOrder.push_back({k.at("time").get<float>(), k.at("order").get<std::vector<int>>()});
+            if (ja.contains("constraints"))
+                for (auto& cj : ja["constraints"]) {
+                    std::vector<ConstraintKey>& keys = an.constraints[cj.at("constraint").get<int>()];
+                    for (auto& k : cj.at("keys")) keys.push_back({k.at("time").get<float>(), valuesFrom(k.at("values"), {}), curveFrom(k)});
+                }
             if (ja.contains("events")) {
                 for (auto& k : ja["events"]) {
                     EventKey e;
