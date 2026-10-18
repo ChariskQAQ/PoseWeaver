@@ -755,6 +755,96 @@ std::vector<float> rowKeyTimes(const Animation& anim, bool isSlot, int index) {
     return t;
 }
 
+template <typename K>
+static void copyAt(const std::vector<K>& src, std::vector<K>& dst, float time, float newTime) {
+    for (const K& k : src) {
+        if (std::fabs(k.time - time) >= kKeyEpsilon) continue;
+        K copy = k;
+        copy.time = newTime;
+        eraseAt(dst, newTime);
+        insertSorted(dst, copy);
+        return;
+    }
+}
+
+void copyKey(const Animation& src, Animation& dst, int index, Channel ch, int sub, float time, float newTime) {
+    switch (ch) {
+    case Channel::DrawOrder: copyAt(src.drawOrder, dst.drawOrder, time, newTime); return;
+    case Channel::Event:
+        for (const EventKey& k : src.events) {
+            if (std::fabs(k.time - time) >= kKeyEpsilon || (index >= 0 && k.event != index)) continue;
+            EventKey copy = k;
+            copy.time = newTime;
+            dst.events.erase(std::remove_if(dst.events.begin(), dst.events.end(),
+                                            [&](const EventKey& o) { return o.event == k.event && std::fabs(o.time - newTime) < kKeyEpsilon; }),
+                             dst.events.end());
+            insertSorted(dst.events, copy);
+        }
+        return;
+    case Channel::Constraint: {
+        auto it = src.constraints.find(index);
+        if (it != src.constraints.end()) copyAt(it->second, dst.constraints[index], time, newTime);
+        if (dst.constraints.count(index) && dst.constraints[index].empty()) dst.constraints.erase(index);
+        return;
+    }
+    case Channel::Attachment:
+    case Channel::Color:
+    case Channel::Deform: {
+        auto it = src.slots.find(index);
+        if (it == src.slots.end()) return;
+        SlotTimeline& d = dst.slots[index];
+        if (ch == Channel::Attachment) copyAt(it->second.attachment, d.attachment, time, newTime);
+        if (ch == Channel::Color) copyAt(it->second.color, d.color, time, newTime);
+        if (ch == Channel::Deform)
+            for (auto& [a, keys] : it->second.deform)
+                if (sub < 0 || a == sub) {
+                    copyAt(keys, d.deform[a], time, newTime);
+                    if (d.deform[a].empty()) d.deform.erase(a);
+                }
+        if (d.empty()) dst.slots.erase(index);
+        return;
+    }
+    default: {
+        auto it = src.bones.find(index);
+        if (it == src.bones.end()) return;
+        BoneTimeline& d = dst.bones[index];
+        if (ch == Channel::Rotate) copyAt(it->second.rotate, d.rotate, time, newTime);
+        if (ch == Channel::Translate) copyAt(it->second.translate, d.translate, time, newTime);
+        if (ch == Channel::Scale) copyAt(it->second.scale, d.scale, time, newTime);
+        if (ch == Channel::Shear) copyAt(it->second.shear, d.shear, time, newTime);
+        if (d.empty()) dst.bones.erase(index);
+    }
+    }
+}
+
+template <typename K>
+static void mergeKeys(std::vector<K>& dst, const std::vector<K>& src, float offset) {
+    for (const K& k : src) copyAt(src, dst, k.time, k.time + offset);
+}
+
+void mergeAnimation(Animation& dst, const Animation& src, float offset) {
+    for (auto& [b, tl] : src.bones) {
+        BoneTimeline& d = dst.bones[b];
+        mergeKeys(d.rotate, tl.rotate, offset);
+        mergeKeys(d.translate, tl.translate, offset);
+        mergeKeys(d.scale, tl.scale, offset);
+        mergeKeys(d.shear, tl.shear, offset);
+    }
+    for (auto& [s, tl] : src.slots) {
+        SlotTimeline& d = dst.slots[s];
+        mergeKeys(d.attachment, tl.attachment, offset);
+        mergeKeys(d.color, tl.color, offset);
+        for (auto& [a, keys] : tl.deform) mergeKeys(d.deform[a], keys, offset);
+    }
+    mergeKeys(dst.drawOrder, src.drawOrder, offset);
+    for (auto& [c, keys] : src.constraints) mergeKeys(dst.constraints[c], keys, offset);
+    for (const EventKey& k : src.events) {
+        Animation one;
+        one.events.push_back(k);
+        copyKey(one, dst, k.event, Channel::Event, -1, k.time, k.time + offset);
+    }
+}
+
 std::vector<const EventKey*> eventsInRange(const Animation& anim, float from, float to) {
     std::vector<const EventKey*> out;
     for (auto& k : anim.events)

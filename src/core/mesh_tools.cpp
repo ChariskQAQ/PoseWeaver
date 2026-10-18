@@ -243,6 +243,64 @@ int pruneWeights(Attachment& att, float threshold, int maxInfluences) {
     return removed;
 }
 
+std::string mirrorName(const std::string& name) {
+    static const std::pair<const char*, const char*> pairs[] = {
+        {"left", "right"}, {"Left", "Right"}, {"LEFT", "RIGHT"}, {"_l", "_r"}, {"_L", "_R"}, {".l", ".r"},
+        {".L", ".R"}, {"l_", "r_"}, {"L_", "R_"}, {"左", "右"}};
+    for (auto [a, b] : pairs)
+        for (int dir = 0; dir < 2; ++dir) {
+            std::string from = dir ? b : a, to = dir ? a : b;
+            bool prefix = from.back() == '_';
+            if (prefix ? name.rfind(from, 0) == 0 : name.size() > from.size() && name.compare(name.size() - from.size(), from.size(), from) == 0)
+                return prefix ? to + name.substr(from.size()) : name.substr(0, name.size() - from.size()) + to;
+            // Words anywhere in the name ("upper_left_arm").
+            size_t at = from.size() > 2 ? name.find(from) : std::string::npos;
+            if (at != std::string::npos) return name.substr(0, at) + to + name.substr(at + from.size());
+        }
+    return "";
+}
+
+int mirrorWeights(const Skeleton& sk, const Slot& slot, Attachment& att, float axisX, bool leftToRight,
+                  const std::vector<int>& boneMirror) {
+    if (!att.isWeighted()) return 0;
+    Pose setup = makeSetupPose(sk);
+    std::vector<Vec2> world = computeVertices(sk, setup, slot, att);
+    auto old = att.weights;
+    auto mirrored = [&](int b) { return b >= 0 && b < (int)boneMirror.size() && boneMirror[b] >= 0 ? boneMirror[b] : b; };
+    int changed = 0;
+    for (size_t v = 0; v < world.size(); ++v) {
+        float side = world[v].x - axisX;
+        bool destination = leftToRight ? side > 1e-3f : side < -1e-3f;
+        if (!destination) continue;
+        Vec2 image{2 * axisX - world[v].x, world[v].y};
+        int best = -1;
+        float bestD = 1e30f;
+        for (size_t s = 0; s < world.size(); ++s) {
+            float sside = world[s].x - axisX;
+            if (leftToRight ? sside > 1e-3f : sside < -1e-3f) continue;  // only source-side vertices
+            float d = length(world[s] - image);
+            if (d < bestD) {
+                bestD = d;
+                best = (int)s;
+            }
+        }
+        if (best < 0) continue;
+        std::vector<VertexWeight> list;
+        for (const VertexWeight& w : old[best]) {
+            VertexWeight m;
+            m.bone = mirrored(w.bone);
+            m.weight = w.weight;
+            m.local = setup.world[m.bone].inverse().apply(world[v]);
+            auto it = std::find_if(list.begin(), list.end(), [&](const VertexWeight& o) { return o.bone == m.bone; });
+            if (it != list.end()) it->weight += m.weight;
+            else list.push_back(m);
+        }
+        att.weights[v] = list;
+        ++changed;
+    }
+    return changed;
+}
+
 std::vector<int> meshBones(const Attachment& att) {
     std::vector<int> out;
     for (auto& list : att.weights)

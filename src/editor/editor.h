@@ -138,10 +138,23 @@ private:
         bool scrubbing = false;
         bool movingKey = false;
         bool panning = false;
+        bool pressedEmpty = false;  // left press on empty space: click = set time, drag = box select
+        bool boxSelecting = false;
         bool checkpointed = false;
+        ImVec2 start;
         SheetRow row{SheetRow::Overview, -1};
         float from = 0;
     } sheetDrag_;
+    struct SheetKey {  // a selected key: the row it was picked on and its time
+        SheetRow row;
+        float time;
+    };
+    std::vector<SheetKey> sheetSel_;
+    int sheetSelAnim_ = -1;
+    rig::Animation sheetClip_;  // copied keys, times relative to the earliest one
+    float sheetClipLength_ = 0;
+    bool hasSheetClip_ = false;
+    bool sheetActive_ = false;  // dopesheet hovered/focused last frame (owns Del / Ctrl+C / Ctrl+V)
     SheetRow sheetMenuRow_{SheetRow::Overview, -1};
     float sheetMenuTime_ = 0;
     float sheetPps_ = 0;      // pixels per second, 0 = fit to width
@@ -184,7 +197,16 @@ private:
     struct FiredEvent { std::string text; float timeLeft; };
     std::vector<FiredEvent> firedEvents_;
     int focusWeights_ = 0;
-    int focusGraph_ = 0;  // frames left to bring the Weights tab to front (docking settles over a few frames)
+    int focusGraph_ = 0;
+    // Onion skin (Animate mode).
+    bool ghostOn_ = false;
+    int ghostBefore_ = 2, ghostAfter_ = 2, ghostStep_ = 3;  // frames
+    float ghostAlpha_ = 0.35f;
+    // Compensation: keep children / attachments in place while transforming a bone.
+    bool compBones_ = false, compImages_ = false;
+    // Weight mirror options.
+    int mirrorAxis_ = 0;  // 0 mesh centre, 1 selected bone origin, 2 world x = 0
+    bool mirrorLeftToRight_ = true;  // frames left to bring the Weights tab to front (docking settles over a few frames)
 
     // frame parts
     void handleShortcuts();
@@ -281,6 +303,12 @@ private:
     // values, Animate: a key at the current time).
     int createConstraint(rig::ConstraintType type);
     void keyConstraint(int c);
+    void bakePhysics(int constraint);  // -1 = every physics constraint
+    // User transform of a bone (tools, numeric entry): setBoneLocal plus compensation.
+    void transformBone(int bone, const rig::Transform& local, bool rot, bool trans, bool scale, bool shear);
+    void drawGhosts(ImDrawList* dl);
+    void drawPoseImages(ImDrawList* dl, const rig::Pose& pose, ImVec4 tint);
+    void mirrorSelectedWeights();
     void setConstraintValues(int c, const rig::ConstraintValues& v);
     void drawConstraints(ImDrawList* dl);
     void drawPaths(ImDrawList* dl);

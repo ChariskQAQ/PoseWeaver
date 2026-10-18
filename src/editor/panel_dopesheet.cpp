@@ -89,9 +89,11 @@ bool sameValue(const Color& a, const Color& b) {
 
 void Editor::drawDopesheet() {
     if (!ImGui::Begin("Dopesheet###Dopesheet")) {
+        sheetActive_ = false;
         ImGui::End();
         return;
     }
+    sheetActive_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) || ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
     ImGuiIO& io = ImGui::GetIO();
     const float fh = ImGui::GetFrameHeight();
 
@@ -187,6 +189,21 @@ void Editor::drawDopesheet() {
                 else if (an)
                     for (auto& [b, tl] : an->bones) sheetLockedBones_.push_back(b);
             }
+        }
+        ImGui::SameLine(0, 12);
+        if (iconOnlyButton("ghost", Icon::Ghost, ghostOn_, "洋葱皮（右键设置）")) ghostOn_ = !ghostOn_;
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("ghostcfg");
+        if (ImGui::BeginPopup("ghostcfg")) {
+            ImGui::TextDisabled("洋葱皮：前后帧半透明叠加");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SliderInt("之前", &ghostBefore_, 0, 8);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SliderInt("之后", &ghostAfter_, 0, 8);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SliderInt("间隔（帧）", &ghostStep_, 1, 30);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SliderFloat("不透明度", &ghostAlpha_, 0.05f, 1.0f, "%.2f");
+            ImGui::EndPopup();
         }
         ImGui::SameLine(0, 2);
         if (iconOnlyButton("zfit", Icon::ZoomFit, sheetPps_ == 0, "时间轴适配宽度")) {
@@ -392,6 +409,38 @@ void Editor::drawDopesheet() {
         for (const KeyMark& m : rowMarks(rows[hoverRow]))
             if (std::fabs(timeToX(m.time) - mouse.x) < 5) hitTime = m.time;
 
+    // ---- key selection helpers ----
+    if (sheetSelAnim_ != anim_) {
+        sheetSel_.clear();
+        sheetSelAnim_ = anim_;
+    }
+    auto sameRow = [](const SheetRow& a, const SheetRow& b) {
+        return a.kind == b.kind && a.index == b.index && (a.kind != SheetRow::Property || (a.channel == b.channel && a.sub == b.sub));
+    };
+    auto findSel = [&](const SheetRow& r, float t) {
+        for (size_t i = 0; i < sheetSel_.size(); ++i)
+            if (sameRow(sheetSel_[i].row, r) && std::fabs(sheetSel_[i].time - t) < kKeyEpsilon) return (int)i;
+        return -1;
+    };
+    auto moveOne = [&](const SheetRow& r, float from, float to) {
+        if (r.kind == SheetRow::Overview) moveKeys(*an, from, to);
+        else if (r.kind == SheetRow::Bone) moveRowKeys(*an, false, r.index, from, to);
+        else if (r.kind == SheetRow::Slot) moveRowKeys(*an, true, r.index, from, to);
+        else moveChannelKey(*an, r.index, r.channel, from, to, r.sub);
+    };
+    auto deleteKeysAt = [&](const SheetRow& r, float t) {
+        for (auto& tg : rowChannels(r))
+            while (removeKey(*an, tg.index, tg.channel, t, tg.sub)) {
+                if (tg.channel != Channel::Event) break;  // several events can share a time
+            }
+    };
+    auto selectAllVisible = [&]() {
+        sheetSel_.clear();
+        for (const SheetRow& r : rows)
+            for (const KeyMark& m : rowMarks(r)) sheetSel_.push_back({r, m.time});
+    };
+
+    // ---- mouse ----
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hoverRow >= 0 && hoverRow < (int)rows.size()) {
         const SheetRow& r = rows[hoverRow];
         playing_ = false;
@@ -419,20 +468,29 @@ void Editor::drawDopesheet() {
                 selectAnimation(anim_);
             }
         } else if (hitTime >= 0) {
+            int idx = findSel(r, hitTime);
+            if (io.KeyCtrl) {
+                if (idx >= 0) sheetSel_.erase(sheetSel_.begin() + idx);
+                else sheetSel_.push_back({r, hitTime});
+            } else if (idx < 0) {
+                sheetSel_ = {{r, hitTime}};
+            }
             sheetDrag_ = SheetDrag{};
-            sheetDrag_.movingKey = true;
+            sheetDrag_.movingKey = !io.KeyCtrl;
             sheetDrag_.row = r;
             sheetDrag_.from = hitTime;
             setTime(hitTime);
         } else {
             sheetDrag_ = SheetDrag{};
-            sheetDrag_.scrubbing = true;
+            sheetDrag_.pressedEmpty = true;
+            sheetDrag_.start = mouse;
         }
     }
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         if (hitTime >= 0) {
             sheetMenuRow_ = rows[hoverRow];
             sheetMenuTime_ = hitTime;
+            if (findSel(sheetMenuRow_, hitTime) < 0) sheetSel_ = {{sheetMenuRow_, hitTime}};
             ImGui::OpenPopup("keymenu");
         } else {
             sheetDrag_ = SheetDrag{};
@@ -451,43 +509,123 @@ void Editor::drawDopesheet() {
     } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         if (sheetDrag_.scrubbing) {
             setTime(xToTime(mouse.x, !io.KeyShift));
+        } else if (sheetDrag_.pressedEmpty) {
+            if (std::fabs(mouse.x - sheetDrag_.start.x) + std::fabs(mouse.y - sheetDrag_.start.y) > 4) sheetDrag_.boxSelecting = true;
         } else if (sheetDrag_.movingKey) {
+            // Every selected key moves by the same amount.
             float t = xToTime(mouse.x, !io.KeyShift);
-            if (std::fabs(t - sheetDrag_.from) > kKeyEpsilon) {
+            float delta = t - sheetDrag_.from;
+            float minT = 1e9f, maxT = -1e9f;
+            for (auto& k : sheetSel_) {
+                minT = std::min(minT, k.time);
+                maxT = std::max(maxT, k.time);
+            }
+            delta = std::clamp(delta, -minT, an->duration - maxT);
+            if (std::fabs(delta) > kKeyEpsilon && !sheetSel_.empty()) {
                 if (!sheetDrag_.checkpointed) {
                     checkpoint();
                     sheetDrag_.checkpointed = true;
                 }
-                const SheetRow& r = sheetDrag_.row;
-                if (r.kind == SheetRow::Overview) moveKeys(*an, sheetDrag_.from, t);
-                else if (r.kind == SheetRow::Bone) moveRowKeys(*an, false, r.index, sheetDrag_.from, t);
-                else if (r.kind == SheetRow::Slot) moveRowKeys(*an, true, r.index, sheetDrag_.from, t);
-                else moveChannelKey(*an, r.index, r.channel, sheetDrag_.from, t, r.sub);
-                sheetDrag_.from = t;
-                setTime(t);
+                // Move in an order that never runs a key over another selected one.
+                std::vector<size_t> order(sheetSel_.size());
+                for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+                std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    return delta > 0 ? sheetSel_[a].time > sheetSel_[b].time : sheetSel_[a].time < sheetSel_[b].time;
+                });
+                for (size_t i : order) {
+                    moveOne(sheetSel_[i].row, sheetSel_[i].time, sheetSel_[i].time + delta);
+                    sheetSel_[i].time += delta;
+                }
+                sheetDrag_.from += delta;
+                setTime(sheetDrag_.from);
             }
         }
     } else {
-        sheetDrag_.scrubbing = sheetDrag_.movingKey = false;
+        if (sheetDrag_.pressedEmpty) {
+            if (sheetDrag_.boxSelecting) {
+                // Box select: every key mark inside the rectangle (Ctrl adds to the selection).
+                if (!io.KeyCtrl) sheetSel_.clear();
+                ImVec2 lo(std::min(mouse.x, sheetDrag_.start.x), std::min(mouse.y, sheetDrag_.start.y));
+                ImVec2 hi(std::max(mouse.x, sheetDrag_.start.x), std::max(mouse.y, sheetDrag_.start.y));
+                for (size_t i = 0; i < rows.size(); ++i) {
+                    float cy = rowsOrigin.y + rowH * (i + 0.5f);
+                    if (cy < lo.y || cy > hi.y) continue;
+                    for (const KeyMark& m : rowMarks(rows[i])) {
+                        float x = timeToX(m.time);
+                        if (x >= lo.x && x <= hi.x && findSel(rows[i], m.time) < 0) sheetSel_.push_back({rows[i], m.time});
+                    }
+                }
+            } else {
+                if (!io.KeyCtrl) sheetSel_.clear();
+                setTime(xToTime(sheetDrag_.start.x, !io.KeyShift));
+            }
+        }
+        sheetDrag_.scrubbing = sheetDrag_.movingKey = sheetDrag_.pressedEmpty = sheetDrag_.boxSelecting = false;
+    }
+
+    // ---- keyboard (when the dopesheet has the mouse or focus) ----
+    if (sheetActive_ && !io.WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !sheetSel_.empty()) {
+            checkpoint();
+            for (auto& k : sheetSel_) deleteKeysAt(k.row, k.time);
+            sheetSel_.clear();
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) selectAllVisible();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && !sheetSel_.empty()) {
+            float t0 = 1e9f, t1 = -1e9f;
+            for (auto& k : sheetSel_) {
+                t0 = std::min(t0, k.time);
+                t1 = std::max(t1, k.time);
+            }
+            sheetClip_ = Animation{};
+            for (auto& k : sheetSel_)
+                for (auto& tg : rowChannels(k.row)) copyKey(*an, sheetClip_, tg.index, tg.channel, tg.sub, k.time, k.time - t0);
+            sheetClipLength_ = t1 - t0;
+            hasSheetClip_ = true;
+            setStatus("已复制 " + std::to_string(sheetSel_.size()) + " 个关键帧");
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && hasSheetClip_) {
+            checkpoint();
+            mergeAnimation(*an, sheetClip_, time_);
+            an->duration = std::max(an->duration, time_ + sheetClipLength_);
+            setStatus("已粘贴到第 " + std::to_string((int)std::round(time_ * fps_)) + " 帧");
+        }
     }
 
     if (ImGui::BeginPopup("keymenu")) {
-        auto targets = rowChannels(sheetMenuRow_);
-        if (ImGui::MenuItem("删除关键帧")) {
+        ImGui::TextDisabled("%d 个关键帧", (int)sheetSel_.size());
+        if (ImGui::MenuItem("删除", "Del")) {
             checkpoint();
-            for (auto& tg : targets)
-                while (removeKey(*an, tg.index, tg.channel, sheetMenuTime_, tg.sub)) {
-                    if (tg.channel != Channel::Event) break;  // several events can share a time
-                }
+            for (auto& k : sheetSel_) deleteKeysAt(k.row, k.time);
+            sheetSel_.clear();
+        }
+        if (ImGui::MenuItem("复制", "Ctrl+C")) {
+            float t0 = 1e9f, t1 = -1e9f;
+            for (auto& k : sheetSel_) {
+                t0 = std::min(t0, k.time);
+                t1 = std::max(t1, k.time);
+            }
+            sheetClip_ = Animation{};
+            for (auto& k : sheetSel_)
+                for (auto& tg : rowChannels(k.row)) copyKey(*an, sheetClip_, tg.index, tg.channel, tg.sub, k.time, k.time - t0);
+            sheetClipLength_ = t1 - t0;
+            hasSheetClip_ = true;
+        }
+        if (ImGui::MenuItem("粘贴到当前帧", "Ctrl+V", false, hasSheetClip_)) {
+            checkpoint();
+            mergeAnimation(*an, sheetClip_, time_);
+            an->duration = std::max(an->duration, time_ + sheetClipLength_);
         }
         bool curves = false;
-        for (auto& tg : targets) curves |= channelHasCurve(tg.channel);
+        for (auto& k : sheetSel_)
+            for (auto& tg : rowChannels(k.row)) curves |= channelHasCurve(tg.channel);
         if (curves) {
             ImGui::Separator();
             auto setCurve = [&](const CurveShape& c) {
                 checkpoint();
-                for (auto& tg : targets)
-                    if (channelHasCurve(tg.channel)) setKeyCurve(*an, tg.index, tg.channel, sheetMenuTime_, c, tg.sub);
+                for (auto& k : sheetSel_)
+                    for (auto& tg : rowChannels(k.row))
+                        if (channelHasCurve(tg.channel)) setKeyCurve(*an, tg.index, tg.channel, k.time, c, tg.sub);
             };
             if (ImGui::MenuItem("曲线: 线性")) setCurve(CurveShape::linear());
             if (ImGui::MenuItem("曲线: 阶梯")) setCurve(CurveShape::stepped());
@@ -587,7 +725,9 @@ void Editor::drawDopesheet() {
         for (const KeyMark& m : rowMarks(r)) {
             float x = timeToX(m.time);
             bool atTime = std::fabs(m.time - time_) < kKeyEpsilon;
+            bool picked = findSel(r, m.time) >= 0;
             ImVec2 k0(x - 2.5f, y + rowH * 0.2f), k1(x + 2.5f, y + rowH * 0.8f);
+            if (picked) rdl->AddRectFilled(k0 - ImVec2(2.5f, 2.5f), k1 + ImVec2(2.5f, 2.5f), IM_COL32(255, 220, 60, 255));
             rdl->AddRectFilled(k0, k1, maskColor(m.mask));
             rdl->AddRect(k0 - ImVec2(0.5f, 0.5f), k1 + ImVec2(0.5f, 0.5f), atTime ? IM_COL32(255, 255, 255, 255) : IM_COL32(20, 20, 20, 220));
         }
@@ -607,6 +747,10 @@ void Editor::drawDopesheet() {
     float px = timeToX(time_);
     rdl->AddLine(ImVec2(px, rowsOrigin.y), ImVec2(px, rowsOrigin.y + rowsH), theme::kPlayhead, 1.5f);
     rdl->PopClipRect();
+    if (sheetDrag_.boxSelecting) {
+        rdl->AddRectFilled(sheetDrag_.start, mouse, IM_COL32(255, 220, 60, 30));
+        rdl->AddRect(sheetDrag_.start, mouse, IM_COL32(255, 220, 60, 200));
+    }
     ImGui::EndChild();
 
     // Playhead marker on the ruler.

@@ -139,7 +139,7 @@ void Editor::drawMainToolbar() {
             if (Attachment* att = transformTargetAttachment()) att->transform = t;
             updatePose();
         } else {
-            setBoneLocal(tv.bone, t, rot, trans, scale, shear);
+            transformBone(tv.bone, t, rot, trans, scale, shear);
         }
     };
     auto keyColor = [&](Channel ch) {
@@ -285,6 +285,18 @@ void Editor::drawMainToolbar() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("数值相对于父骨骼坐标轴（存储方式）");
         if (iconButton("world", Icon::World, "世界", axes_ == Axes::World, w)) axes_ = Axes::World;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("数值为世界坐标");
+    }
+    endGroup();
+    nextX();
+
+    // ---- compensation ----
+    if (beginGroup("##comp", ImVec2(x, y), h)) {
+        float w = ImGui::CalcTextSize("骨骼").x + fh + 16;
+        ImGui::TextDisabled("补偿");
+        if (iconButton("compb", Icon::Bone, "骨骼", compBones_, w)) compBones_ = !compBones_;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("调整骨骼时子骨骼保持原位（Animate 模式会给子骨骼打帧）");
+        if (iconButton("compi", Icon::Image, "图片", compImages_, w)) compImages_ = !compImages_;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("调整骨骼时附件保持原位（仅 Setup 模式、未绑定的附件）");
     }
     endGroup();
     nextX();

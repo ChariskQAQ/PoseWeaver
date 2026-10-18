@@ -274,6 +274,11 @@ void moveChannelKey(Animation& anim, int index, Channel ch, float from, float to
 // Sorted, de-duplicated times of every key in the animation (or one row of it).
 std::vector<float> keyTimes(const Animation& anim);
 std::vector<float> rowKeyTimes(const Animation& anim, bool isSlot, int index);
+// Copies the key of one channel at `time` from `src` into `dst` at `newTime` (replacing what is
+// there). Index / sub as for removeKey; Event with index < 0 copies every event at that time.
+void copyKey(const Animation& src, Animation& dst, int index, Channel ch, int sub, float time, float newTime);
+// Inserts every key of `src` into `dst`, shifted by `offset` seconds (same-time keys are replaced).
+void mergeAnimation(Animation& dst, const Animation& src, float offset);
 // Events whose time is in (from, to]; from < 0 includes time 0.
 std::vector<const EventKey*> eventsInRange(const Animation& anim, float from, float to);
 

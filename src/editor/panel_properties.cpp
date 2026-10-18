@@ -748,8 +748,14 @@ void Editor::propertiesConstraint(int ci) {
         }
         ImGui::EndTable();
     }
-    if (c.type == ConstraintType::Physics)
+    if (c.type == ConstraintType::Physics) {
         ImGui::TextDisabled(physicsOn_ ? "物理预览已开启：拖动父骨骼或播放动画观察效果。" : "物理预览已关闭（视口工具栏 → 物理预览）。");
+        ImGui::BeginDisabled(setup || !currentAnimation());
+        if (ImGui::Button("烘焙到当前动画")) bakePhysics(ci);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("把物理模拟逐帧写成旋转/移动关键帧，并在该动画里把物理混合设为 0（Animate 模式）");
+        ImGui::EndDisabled();
+    }
     if (c.type == ConstraintType::Path) ImGui::TextDisabled("选中路径附件后用网格工具 (M) 编辑：方点是路径点，圆点是手柄，Alt+点击加点。");
 }
 
@@ -921,6 +927,18 @@ void Editor::drawWeightsView() {
         setStatus("已移除 " + std::to_string(removed) + " 个影响");
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("去掉低于阈值的影响，并限制每个顶点的骨骼数");
+
+    ImGui::SeparatorText("镜像");
+    const char* axes[] = {"网格中心", "所选骨骼原点", "世界 x = 0"};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+    ImGui::Combo("对称轴", &mirrorAxis_, axes, 3);
+    int dir = mirrorLeftToRight_ ? 0 : 1;
+    const char* dirs[] = {"左 → 右", "右 → 左"};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+    if (ImGui::Combo("方向", &dir, dirs, 2)) mirrorLeftToRight_ = dir == 0;
+    if (ImGui::Button("镜像权重")) mirrorSelectedWeights();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("按骨骼名字配对左右骨骼（_l/_r、left/right、L_/R_、左/右），把一侧的权重复制到另一侧");
 
     ImGui::Spacing();
     if (ImGui::Button("重新自动权重")) {

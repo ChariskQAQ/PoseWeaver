@@ -321,8 +321,8 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         ensureCheckpoint();
         Transform t = drag_.startTransform;
         applyTool(t);
-        setBoneLocal(sel_.bone, t, drag_.tool == Tool::Rotate, drag_.tool == Tool::Translate, drag_.tool == Tool::Scale,
-                     drag_.tool == Tool::Shear);
+        transformBone(sel_.bone, t, drag_.tool == Tool::Rotate, drag_.tool == Tool::Translate, drag_.tool == Tool::Scale,
+                      drag_.tool == Tool::Shear);
         break;
     }
     case Drag::PoseRotate: {
@@ -334,7 +334,7 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         t.rotation = drag_.parentWorld.det() < 0 ? parentRot - target : target - parentRot;
         // Keep the value continuous with the start rotation (no 360° jumps in keys).
         t.rotation = drag_.startTransform.rotation + wrapDeg(t.rotation - drag_.startTransform.rotation);
-        setBoneLocal(sel_.bone, t, true, false, false);
+        transformBone(sel_.bone, t, true, false, false, false);
         break;
     }
     case Drag::BoneLength: {
@@ -625,6 +625,45 @@ void Editor::drawBones(ImDrawList* dl) {
     }
 }
 
+void Editor::drawPoseImages(ImDrawList* dl, const Pose& pose, ImVec4 tint) {
+    Geometry g;
+    for (int s : pose.drawOrder) {
+        if (hiddenSlots_.count(s)) continue;
+        const Slot& slot = sk_.slots[s];
+        int a = s < (int)pose.slotAttachment.size() ? pose.slotAttachment[s] : -1;
+        if (a < 0 || a >= (int)slot.attachments.size()) continue;
+        const Attachment& att = slot.attachments[a];
+        if (att.isPolygon() || att.image < 0 || att.image >= (int)textures_.size() || !textures_[att.image].id) continue;
+        computeGeometry(sk_, pose, slot, att, g, findDeform(pose, s, a));
+        const Color& c = s < (int)pose.slotColor.size() ? pose.slotColor[s] : slot.color;
+        ImU32 col = ImGui::ColorConvertFloat4ToU32({c[0] * tint.x, c[1] * tint.y, c[2] * tint.z, c[3] * tint.w});
+        dl->PushTextureID((ImTextureID)(intptr_t)textures_[att.image].id);
+        dl->PrimReserve((int)g.triangles.size(), (int)g.positions.size());
+        unsigned int base = dl->_VtxCurrentIdx;
+        for (size_t v = 0; v < g.positions.size(); ++v) dl->PrimWriteVtx(toScreen(g.positions[v]), toIm(g.uvs[v]), col);
+        for (int idx : g.triangles) dl->PrimWriteIdx((ImDrawIdx)(base + idx));
+        dl->PopTextureID();
+    }
+}
+
+void Editor::drawGhosts(ImDrawList* dl) {
+    Animation* an = currentAnimation();
+    if (!ghostOn_ || mode_ != Mode::Animate || !an || !view_.imagesVisible) return;
+    float step = std::max(1, ghostStep_) / fps_;
+    // Farthest ghosts first so nearer ones draw on top; before = red, after = green.
+    for (int side = 0; side < 2; ++side) {
+        int count = side == 0 ? ghostBefore_ : ghostAfter_;
+        for (int k = count; k >= 1; --k) {
+            float t = time_ + (side == 0 ? -k : k) * step;
+            if (loop_ && an->duration > 0) t = std::fmod(t + an->duration * 4, an->duration);
+            else if (t < 0 || t > an->duration) continue;
+            float alpha = ghostAlpha_ * (1.0f - (k - 1) / (float)(count + 1));
+            ImVec4 tint = side == 0 ? ImVec4(1.0f, 0.45f, 0.45f, alpha) : ImVec4(0.45f, 1.0f, 0.55f, alpha);
+            drawPoseImages(dl, makeAnimatedPose(sk_, an, t), tint);
+        }
+    }
+}
+
 static void dashed(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float thickness) {
     float len = dist(a, b);
     if (len < 1) return;
@@ -753,6 +792,7 @@ void Editor::drawViewport() {
     dl->AddLine({lo.x, origin.y}, {hi.x, origin.y}, IM_COL32(20, 20, 20, 110));
     dl->AddLine({origin.x, lo.y}, {origin.x, hi.y}, IM_COL32(20, 20, 20, 110));
 
+    drawGhosts(dl);
     drawSlots(dl);
     drawMeshOverlay(dl);
     drawBones(dl);

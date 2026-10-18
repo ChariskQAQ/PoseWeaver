@@ -821,6 +821,134 @@ void Editor::deleteSelection() {
     }
 }
 
+// ---------------------------------------------------------------- compensation
+
+void Editor::transformBone(int bone, const Transform& local, bool rot, bool trans, bool scale, bool shear) {
+    if (bone < 0 || bone >= (int)sk_.bones.size()) return;
+    Pose before = pose_;
+    setBoneLocal(bone, local, rot, trans, scale, shear);
+    if (!compBones_ && !compImages_) return;
+    const Affine& newWorld = pose_.world[bone];
+    const Affine& oldWorld = before.world[bone];
+    if (compBones_) {
+        // Children keep their world transform: give them the inverse change.
+        for (int c : sk_.children(bone)) {
+            Transform want = decompose(newWorld.inverse() * before.world[c]);
+            const Transform& cur = pose_.local[c];
+            auto differs = [](float a, float b) { return std::fabs(a - b) > 1e-4f; };
+            bool r = differs(want.rotation, cur.rotation);
+            bool t = differs(want.x, cur.x) || differs(want.y, cur.y);
+            bool s = differs(want.scaleX, cur.scaleX) || differs(want.scaleY, cur.scaleY);
+            bool sh = differs(want.shearX, cur.shearX) || differs(want.shearY, cur.shearY);
+            want.rotation = cur.rotation + wrapDeg(want.rotation - cur.rotation);
+            if (r || t || s || sh) setBoneLocal(c, want, r, t, s, sh);
+        }
+    }
+    if (compImages_) {
+        if (mode_ != Mode::Setup) {
+            setStatus("图片补偿只在 Setup 模式下生效");
+            return;
+        }
+        // Attachments on the bone keep their world placement (unweighted ones; weighted
+        // vertices follow their bones by design).
+        Affine change = newWorld.inverse() * oldWorld;
+        for (auto& slot : sk_.slots) {
+            if (slot.bone != bone) continue;
+            for (auto& att : slot.attachments) {
+                if (att.type == AttachmentType::Region) att.transform = decompose(change * att.transform.matrix());
+                else if (!att.isWeighted())
+                    for (auto& v : att.vertices) v = change.apply(v);
+            }
+        }
+        updatePose();
+    }
+}
+
+void Editor::bakePhysics(int only) {
+    Animation* an = currentAnimation();
+    if (!an || mode_ != Mode::Animate) {
+        setStatus("请在 Animate 模式下选择要烘焙的动画");
+        return;
+    }
+    std::vector<int> cons;
+    for (int i = 0; i < (int)sk_.constraints.size(); ++i)
+        if (sk_.constraints[i].type == ConstraintType::Physics && (only < 0 || only == i) && !sk_.constraints[i].bones.empty())
+            cons.push_back(i);
+    if (cons.empty()) {
+        setStatus("没有可烘焙的物理约束");
+        return;
+    }
+    checkpoint();
+    const int frames = std::max(1, (int)std::round(an->duration * fps_));
+    const float step = 1.0f / fps_;
+    // Disable the baked constraints for this animation, then simulate: one warm-up pass when
+    // looping so the first frames match the end of the loop.
+    std::vector<ConstraintValues> saved;
+    for (int c : cons) saved.push_back(sk_.constraints[c].values);
+    PhysicsState state;
+    std::map<int, std::vector<Transform>> baked;  // bone -> applied local per frame
+    for (int pass = loop_ ? 0 : 1; pass < 2; ++pass) {
+        for (int f = 0; f <= frames; ++f) {
+            Pose p = makeAnimatedPose(sk_, an, f * step);
+            applyPhysics(sk_, p, state, f == 0 && pass == 0 ? 0.0f : step);
+            if (pass == 1)
+                for (int c : cons) baked[sk_.constraints[c].bones[0]].push_back(p.applied[sk_.constraints[c].bones[0]]);
+        }
+    }
+    for (auto& [b, locals] : baked) {
+        const Transform& s = sk_.bones[b].setup;
+        BoneTimeline& tl = an->bones[b];
+        tl.rotate.clear();
+        tl.translate.clear();
+        for (int f = 0; f <= frames; ++f) {
+            const Transform& l = locals[f];
+            setRotateKey(*an, b, f * step, l.rotation - s.rotation);
+            setTranslateKey(*an, b, f * step, {l.x - s.x, l.y - s.y});
+        }
+    }
+    for (size_t i = 0; i < cons.size(); ++i) {
+        ConstraintValues v = saved[i];
+        v[0] = 0;  // mix 0: this animation plays the baked keys instead of simulating
+        an->constraints[cons[i]].clear();
+        setConstraintKey(*an, cons[i], 0, v);
+    }
+    physics_.reset();
+    updatePose();
+    setStatus("已烘焙 " + std::to_string(cons.size()) + " 个物理约束，" + std::to_string(frames + 1) + " 帧（该动画中物理混合已设为 0）");
+}
+
+void Editor::mirrorSelectedWeights() {
+    Attachment* att = selectedAttachment();
+    if (!att || !att->isWeighted()) return;
+    const Slot& slot = sk_.slots[sel_.slot];
+    Pose setup = makeSetupPose(sk_);
+    float axis = 0;
+    if (mirrorAxis_ == 0) {
+        std::vector<Vec2> world = computeVertices(sk_, setup, slot, *att);
+        float lo = 1e9f, hi = -1e9f;
+        for (Vec2 p : world) {
+            lo = std::min(lo, p.x);
+            hi = std::max(hi, p.x);
+        }
+        axis = (lo + hi) * 0.5f;
+    } else if (mirrorAxis_ == 1 && sel_.bone >= 0) {
+        axis = setup.world[sel_.bone].origin().x;
+    }
+    std::vector<int> mirror(sk_.bones.size(), -1);
+    int pairs = 0;
+    for (int b = 0; b < (int)sk_.bones.size(); ++b) {
+        std::string m = mirrorName(sk_.bones[b].name);
+        int mb = m.empty() ? -1 : sk_.findBone(m);
+        if (mb >= 0) {
+            mirror[b] = mb;
+            ++pairs;
+        }
+    }
+    checkpoint();
+    int changed = mirrorWeights(sk_, slot, *att, axis, mirrorLeftToRight_, mirror);
+    setStatus("已镜像 " + std::to_string(changed) + " 个顶点的权重（配对骨骼 " + std::to_string(pairs / 2) + " 对）");
+}
+
 // ---------------------------------------------------------------- constraints
 
 int Editor::addPathSlot(int bone, Vec2 a, Vec2 b) {
@@ -1165,7 +1293,7 @@ void Editor::handleShortcuts() {
         sel_.clear();
         drag_ = Drag{};
     }
-    if (pressed(ImGuiKey_Delete)) {
+    if (pressed(ImGuiKey_Delete) && !sheetActive_) {
         if (tool_ == Tool::MeshEdit && mode_ == Mode::Setup && !sel_.vertices.empty()) meshDeleteSelectedVertices();
         else deleteSelection();
     }
@@ -1347,6 +1475,31 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
     undo_.clear();
     redo_.clear();
     dirty_ = false;
+    if (scenario == "ghost") {
+        mode_ = Mode::Animate;
+        time_ = time;
+        ghostOn_ = true;
+        ghostBefore_ = ghostAfter_ = 2;
+        ghostStep_ = 4;
+        selectBone(low);
+        sheetSel_ = {{{SheetRow::Overview, -1}, 0.0f}, {{SheetRow::Overview, -1}, 0.5f}};
+        sheetSelAnim_ = 0;
+        frameAllIn_ = 5;
+        return;
+    }
+    if (scenario == "bake") {
+        mode_ = Mode::Setup;
+        selectBone(low);
+        createConstraint(ConstraintType::Physics);
+        setMode(Mode::Animate);
+        time_ = time;
+        bakePhysics(-1);
+        selectBone(low);
+        undo_.clear();
+        dirty_ = false;
+        frameAllIn_ = 5;
+        return;
+    }
     if (scenario == "ik" || scenario == "path") {
         mode_ = Mode::Setup;
         tool_ = Tool::Translate;

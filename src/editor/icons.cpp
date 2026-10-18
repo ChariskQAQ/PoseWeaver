@@ -215,6 +215,11 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float size, ImU32 col) {
         dl->AddCircleFilled(pts[n], s * 0.16f, col);
         break;
     }
+    case Icon::Ghost:
+        dl->AddCircleFilled(P(c, s, -0.35f, 0.0f), s * 0.55f, (col & 0x00FFFFFF) | 0x50000000);
+        dl->AddCircleFilled(P(c, s, 0.0f, 0.0f), s * 0.55f, (col & 0x00FFFFFF) | 0x80000000);
+        dl->AddCircleFilled(P(c, s, 0.35f, 0.0f), s * 0.55f, col);
+        break;
     case Icon::Physics: {
         ImVec2 pts[8];
         for (int i = 0; i < 8; ++i) pts[i] = P(c, s, -0.8f + 1.6f * i / 7, (i % 2 ? -0.45f : 0.45f) * (i == 0 || i == 7 ? 0 : 1));

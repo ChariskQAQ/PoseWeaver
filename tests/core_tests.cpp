@@ -686,6 +686,72 @@ static void testConstraintBookkeeping() {
     CHECK(sk.constraints.empty() && sk.animations[0].constraints.empty());
 }
 
+static void testCopyPaste() {
+    Animation src;
+    setRotateKey(src, 1, 0.5f, 30);
+    setKeyCurve(src, 1, Channel::Rotate, 0.5f, CurveShape::stepped());
+    setTranslateKey(src, 1, 0.5f, {1, 2});
+    setColorKey(src, 0, 0.75f, Color(1, 0, 0, 1));
+    EventDef e;
+    e.name = "e";
+    setEventKey(src, 0.75f, 0, e);
+    // Copy two keys into a clipboard, relative to the earliest one.
+    Animation clip;
+    copyKey(src, clip, 1, Channel::Rotate, -1, 0.5f, 0.0f);
+    copyKey(src, clip, 0, Channel::Color, -1, 0.75f, 0.25f);
+    copyKey(src, clip, -1, Channel::Event, -1, 0.75f, 0.25f);
+    CHECK(clip.bones[1].rotate.size() == 1 && clip.bones[1].translate.empty());
+    CHECK(clip.bones[1].rotate[0].curve.type == Curve::Stepped);
+    // Paste at 2s.
+    Animation dst;
+    setRotateKey(dst, 1, 2.0f, 99);  // replaced by the paste
+    mergeAnimation(dst, clip, 2.0f);
+    CHECK(dst.bones[1].rotate.size() == 1 && near(dst.bones[1].rotate[0].value, 30) && near(dst.bones[1].rotate[0].time, 2));
+    CHECK(dst.slots[0].color.size() == 1 && near(dst.slots[0].color[0].time, 2.25f));
+    CHECK(dst.events.size() == 1 && near(dst.events[0].time, 2.25f));
+    // Pasting twice does not duplicate keys.
+    mergeAnimation(dst, clip, 2.0f);
+    CHECK(dst.bones[1].rotate.size() == 1 && dst.events.size() == 1);
+}
+
+static void testMirrorWeights() {
+    CHECK(mirrorName("arm_l") == "arm_r" && mirrorName("R_leg") == "L_leg" && mirrorName("upper_left_arm") == "upper_right_arm");
+    CHECK(mirrorName("spine") == "");
+    // A wide mesh centred on x = 0 with a left and a right bone.
+    Skeleton sk;
+    int root = sk.addBone("root", -1, {}, 0);
+    Transform l, r;
+    l.x = -50;
+    r.x = 50;
+    int bl = sk.addBone("arm_l", root, l, 40);
+    int br = sk.addBone("arm_r", root, r, 40);
+    sk.images.push_back({"w.png", 200, 40});
+    Slot s;
+    s.bone = root;
+    Attachment a;
+    a.image = 0;
+    s.attachments.push_back(a);
+    s.activeAttachment = 0;
+    sk.slots.push_back(s);
+    Attachment& m = sk.slots[0].attachments[0];
+    convertRegionToMesh(m, sk.images[0], nullptr, 4, 1);
+    bindMesh(sk, sk.slots[0], m, {bl, br});
+    // Make the left side fully weighted to arm_l, the right side to root.
+    Pose setup = makeSetupPose(sk);
+    std::vector<Vec2> world = computeVertices(sk, setup, sk.slots[0], m);
+    for (size_t v = 0; v < world.size(); ++v) setWeight(sk, sk.slots[0], m, (int)v, world[v].x < 0 ? bl : root, 1.0f);
+    std::vector<int> mirror(sk.bones.size(), -1);
+    mirror[bl] = br;
+    mirror[br] = bl;
+    int changed = mirrorWeights(sk, sk.slots[0], m, 0.0f, true, mirror);
+    CHECK(changed > 0);
+    for (size_t v = 0; v < world.size(); ++v)
+        if (world[v].x > 1) CHECK(near(vertexWeight(m, (int)v, br), 1.0f));
+    // Positions are unchanged by mirroring.
+    std::vector<Vec2> after = computeVertices(sk, setup, sk.slots[0], m);
+    for (size_t v = 0; v < world.size(); ++v) CHECK(near(after[v], world[v]));
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -743,6 +809,8 @@ int main() {
     testPathConstraint();
     testPhysics();
     testConstraintBookkeeping();
+    testCopyPaste();
+    testMirrorWeights();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

@@ -75,6 +75,14 @@ void smoothWeights(const Skeleton& sk, const Slot& slot, Attachment& att, const 
                    float amount, const std::vector<int>& locked = {});
 // Drop influences below `threshold` and keep at most `maxInfluences` per vertex. Returns removed count.
 int pruneWeights(Attachment& att, float threshold, int maxInfluences);
+// Mirrors weights across the vertical world line x = axisX (setup pose): every vertex on the
+// destination side takes the weights of the vertex nearest to its mirror image, with bones
+// swapped through `boneMirror` (boneMirror[b] = mirrored bone, or b itself). Returns the
+// number of vertices changed.
+int mirrorWeights(const Skeleton& sk, const Slot& slot, Attachment& att, float axisX, bool leftToRight,
+                  const std::vector<int>& boneMirror);
+// Name of the mirrored bone ("arm_l" <-> "arm_r", "left" <-> "right", "L_" <-> "R_" ...), or "" if none.
+std::string mirrorName(const std::string& name);
 // Bones that influence any vertex of the mesh.
 std::vector<int> meshBones(const Attachment& att);
 
