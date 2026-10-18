@@ -556,7 +556,30 @@ void Editor::propertiesEvent(int e) {
                 ev.audioPath = path;
             }
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("选择音频文件（播放功能在阶段 6 实现）");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("选择音频文件（WAV / MP3 / FLAC）");
+        if (!ev.audioPath.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("试听")) audio_->play(ev.audioPath, 0, ev.volume, ev.balance, 1);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x##noaudio")) {
+                checkpoint();
+                ev.audioPath.clear();
+            }
+            const AudioSamples* smp = ev.audioPath.empty() ? nullptr : audio_->samples(ev.audioPath);
+            propLabel("时长");
+            if (smp) ImGui::Text("%.2f 秒", smp->duration());
+            else ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "无法读取");
+            propLabel("音量");
+            float vol = ev.volume;
+            bool cv = ImGui::SliderFloat("##vol", &vol, 0, 1, "%.2f");
+            if (ImGui::IsItemActivated()) checkpoint();
+            if (cv) ev.volume = vol;
+            propLabel("左右平衡");
+            float bal = ev.balance;
+            bool cb = ImGui::SliderFloat("##bal", &bal, -1, 1, "%.2f");
+            if (ImGui::IsItemActivated()) checkpoint();
+            if (cb) ev.balance = bal;
+        }
         ImGui::EndTable();
     }
     int uses = 0;

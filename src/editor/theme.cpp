@@ -13,7 +13,7 @@ void loadFonts(float scale) {
     static ImVector<ImWchar> ranges;
     ImFontGlyphRangesBuilder builder;
     builder.AddRanges(io.Fonts->GetGlyphRangesChineseFull());
-    static const ImWchar extra[] = {0x2000, 0x206F, 0x2190, 0x21FF, 0x25A0, 0x25FF, 0xFF00, 0xFFEF, 0};
+    static const ImWchar extra[] = {0x2000, 0x206F, 0x2190, 0x21FF, 0x25A0, 0x25FF, 0x2600, 0x26FF, 0xFF00, 0xFFEF, 0};
     builder.AddRanges(extra);
     builder.BuildRanges(&ranges);
 

@@ -1,6 +1,7 @@
 // Dopesheet: overview row → bone / slot rows → property rows, plus draw order and events.
 #include "editor/editor.h"
 
+#include "core/audio_mix.h"
 #include "editor/channels.h"
 #include "editor/icons.h"
 #include "editor/theme.h"
@@ -191,6 +192,11 @@ void Editor::drawDopesheet() {
             }
         }
         ImGui::SameLine(0, 12);
+        if (iconOnlyButton("audio", Icon::Audio, audioOn_, audio_->deviceAvailable() ? "播放音频事件" : "没有可用的音频输出设备")) {
+            audioOn_ = !audioOn_;
+            if (!audioOn_) audio_->stopAll();
+        }
+        ImGui::SameLine(0, 2);
         if (iconOnlyButton("ghost", Icon::Ghost, ghostOn_, "洋葱皮（右键设置）")) ghostOn_ = !ghostOn_;
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("ghostcfg");
         if (ImGui::BeginPopup("ghostcfg")) {
@@ -256,6 +262,13 @@ void Editor::drawDopesheet() {
     }
     if (!an->drawOrder.empty()) rows.push_back({SheetRow::Property, -1, Channel::DrawOrder});
     if (!an->events.empty()) rows.push_back({SheetRow::Property, -1, Channel::Event});
+    {
+        std::vector<int> audioEvents;
+        for (const AudioEventKey& k : audioEventKeys(sk_, *an))
+            if (std::find(audioEvents.begin(), audioEvents.end(), k.event) == audioEvents.end()) audioEvents.push_back(k.event);
+        std::sort(audioEvents.begin(), audioEvents.end());
+        for (int e : audioEvents) rows.push_back({SheetRow::Audio, e, Channel::Event});
+    }
     for (auto& [ci, keys] : an->constraints)
         if (!keys.empty() && ci < (int)sk_.constraints.size()) rows.push_back({SheetRow::Property, ci, Channel::Constraint});
 
@@ -279,6 +292,10 @@ void Editor::drawDopesheet() {
             if (it != an->slots.end()) addSlot(m, it->second);
             break;
         }
+        case SheetRow::Audio:
+            for (const EventKey& k : an->events)
+                if (k.event == r.index) addMark(m, k.time, Channel::Event);
+            break;
         case SheetRow::Property:
             if (r.channel == Channel::Constraint) {
                 auto it = an->constraints.find(r.index);
@@ -325,6 +342,9 @@ void Editor::drawDopesheet() {
             break;
         case SheetRow::Property:
             out.push_back({r.index, r.channel, r.sub});
+            break;
+        case SheetRow::Audio:
+            out.push_back({r.index, Channel::Event, -1});
             break;
         }
         return out;
@@ -426,6 +446,7 @@ void Editor::drawDopesheet() {
         if (r.kind == SheetRow::Overview) moveKeys(*an, from, to);
         else if (r.kind == SheetRow::Bone) moveRowKeys(*an, false, r.index, from, to);
         else if (r.kind == SheetRow::Slot) moveRowKeys(*an, true, r.index, from, to);
+        else if (r.kind == SheetRow::Audio) moveChannelKey(*an, r.index, Channel::Event, from, to);
         else moveChannelKey(*an, r.index, r.channel, from, to, r.sub);
     };
     auto deleteKeysAt = [&](const SheetRow& r, float t) {
@@ -466,6 +487,8 @@ void Editor::drawDopesheet() {
                 selectSlot(r.index);
             } else if (r.kind == SheetRow::Overview) {
                 selectAnimation(anim_);
+            } else if (r.kind == SheetRow::Audio) {
+                selectEvent(r.index);
             }
         } else if (hitTime >= 0) {
             int idx = findSel(r, hitTime);
@@ -645,7 +668,8 @@ void Editor::drawDopesheet() {
         const SheetRow& r = rows[i];
         float y = rowsOrigin.y + rowH * i;
         ImVec2 a(rowsOrigin.x, y), b(rowsOrigin.x + rowsW, y + rowH);
-        ImU32 bg = r.kind == SheetRow::Overview ? IM_COL32(64, 104, 104, 255)
+        ImU32 bg = r.kind == SheetRow::Audio  ? IM_COL32(46, 42, 58, 255)
+                 : r.kind == SheetRow::Overview ? IM_COL32(64, 104, 104, 255)
                    : r.kind == SheetRow::Bone   ? IM_COL32(78, 120, 118, 255)
                    : r.kind == SheetRow::Slot   ? IM_COL32(88, 100, 128, 255)
                                                 : IM_COL32(56, 56, 59, 255);
@@ -664,6 +688,9 @@ void Editor::drawDopesheet() {
             rdl->AddText(ImVec2(tx, ty), textCol, collapsed ? "+" : "-");
             drawIcon(rdl, Icon::Bone, ImVec2(tx + ih * 1.4f, ty + ih * 0.5f), ih * 0.8f, iconColor(Icon::Bone));
             rdl->AddText(ImVec2(tx + ih * 2.2f, ty), textCol, sk_.bones[r.index].name.c_str());
+        } else if (r.kind == SheetRow::Audio) {
+            drawIcon(rdl, Icon::Audio, ImVec2(tx + ih * 0.5f, ty + ih * 0.5f), ih * 0.75f, theme::kEvent);
+            rdl->AddText(ImVec2(tx + ih * 1.3f, ty), textCol, sk_.events[r.index].name.c_str());
         } else if (r.kind == SheetRow::Slot) {
             drawIcon(rdl, Icon::Slot, ImVec2(tx + ih * 1.4f, ty + ih * 0.5f), ih * 0.75f, iconColor(Icon::Slot));
             rdl->AddText(ImVec2(tx + ih * 2.2f, ty), textCol, sk_.slots[r.index].name.c_str());
@@ -718,6 +745,29 @@ void Editor::drawDopesheet() {
                     if (r.channel == Channel::Translate) draw(it->second.translate);
                     if (r.channel == Channel::Scale) draw(it->second.scale);
                     if (r.channel == Channel::Shear) draw(it->second.shear);
+                }
+            }
+        }
+        if (r.kind == SheetRow::Audio) {
+            const std::string& file = sk_.events[r.index].audioPath;
+            const std::vector<float>* peaks = audio_->peaks(file);
+            float mid = y + rowH * 0.5f, amp = rowH * 0.42f;
+            for (const EventKey& k : an->events) {
+                if (k.event != r.index) continue;
+                float x0 = timeToX(k.time);
+                if (!peaks || peaks->empty()) {
+                    rdl->AddText(ImVec2(x0 + 6, ty), IM_COL32(240, 110, 110, 255), "无法读取音频");
+                    continue;
+                }
+                float x1 = timeToX(k.time + peaks->size() / 100.0f);
+                rdl->AddRectFilled(ImVec2(x0, y + 2), ImVec2(x1, b.y - 2), IM_COL32(170, 110, 235, 40), 2);
+                // One vertical bar per pixel column, using the loudest peak it covers.
+                float perPixel = (float)peaks->size() / std::max(1.0f, x1 - x0);
+                for (float x = std::max(x0, keysX0 - 6); x < std::min(x1, b.x); x += 1) {
+                    size_t p0 = (size_t)((x - x0) * perPixel), p1 = std::min(peaks->size(), (size_t)((x + 1 - x0) * perPixel) + 1);
+                    float p = 0;
+                    for (size_t q = p0; q < p1; ++q) p = std::max(p, (*peaks)[q]);
+                    rdl->AddLine(ImVec2(x, mid - p * amp), ImVec2(x, mid + p * amp), IM_COL32(200, 160, 255, 210));
                 }
             }
         }

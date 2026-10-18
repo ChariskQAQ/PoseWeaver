@@ -5,7 +5,7 @@
 enum class Icon {
     Skeleton, Bone, Slot, Region, Mesh, Animation, Image, DrawOrder,
     Pose, Weights, Create, MeshTool, Rotate, Translate, Scale, Shear, Event, Color, Graph, Clipping, BoundingBox, Deform,
-    Constraint, Ik, TransformC, PathC, Physics, Ghost, Skin,
+    Constraint, Ik, TransformC, PathC, Physics, Ghost, Skin, Audio,
     Local, Parent, World, AutoKey, Key,
     First, Last, PrevKey, NextKey, Play, PlayBack, Pause, Loop, Lock,
     Zoom100, ZoomFit, Search

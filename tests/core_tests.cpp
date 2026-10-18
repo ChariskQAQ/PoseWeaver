@@ -1,5 +1,6 @@
 // Minimal self-checking tests for rigcore (no framework dependency).
 #include "core/atlas.h"
+#include "core/audio_mix.h"
 #include "core/clipping.h"
 #include "core/merge.h"
 #include "core/psd.h"
@@ -1086,6 +1087,56 @@ static void testPsd() {
     CHECK(!parsePsd(bad, doc, &err));
 }
 
+static void testAudioMix() {
+    // 0.5 s of a 440 Hz sine at 22050 Hz, full amplitude on both channels.
+    AudioSamples tone;
+    tone.sampleRate = 22050;
+    for (int i = 0; i < 11025; ++i) {
+        float v = std::sin(2 * 3.14159265f * 440 * i / 22050.0f);
+        tone.stereo.push_back(v);
+        tone.stereo.push_back(v);
+    }
+    CHECK(near(tone.duration(), 0.5f));
+    std::vector<float> peaks = computePeaks(tone, 100);
+    CHECK(peaks.size() == 51 && peaks[10] > 0.95f);  // 220-frame buckets, the last one partial
+    // Placed at 0.25 s on a 1 s, 44100 Hz timeline, panned hard left at half volume.
+    std::vector<float> mix = mixAudio({{&tone, 0.25f, 0.5f, -1.0f}}, 1.0f, 44100);
+    CHECK(mix.size() == 44100 * 2);
+    float before = 0, leftPeak = 0, rightPeak = 0, after = 0;
+    for (int f = 0; f < 44100; ++f) {
+        float l = std::fabs(mix[f * 2]), r = std::fabs(mix[f * 2 + 1]);
+        if (f < 11000) before = std::max(before, l + r);
+        else if (f < 33000) {
+            leftPeak = std::max(leftPeak, l);
+            rightPeak = std::max(rightPeak, r);
+        } else if (f > 33200) after = std::max(after, l + r);
+    }
+    CHECK(before == 0 && after == 0 && near(leftPeak, 0.5f, 0.02f) && rightPeak == 0);
+    // Negative start: begins part-way through the sound.
+    std::vector<float> late = mixAudio({{&tone, -0.4f, 1, 0}}, 0.2f, 22050);
+    float nonzero = 0;
+    for (size_t f = 0; f < late.size() / 2; ++f) nonzero += std::fabs(late[f * 2]);
+    CHECK(nonzero > 0 && std::fabs(late[(size_t)(0.15f * 22050) * 2]) == 0);
+    // Overlaps are clamped.
+    std::vector<float> loud = mixAudio({{&tone, 0, 1, 0}, {&tone, 0, 1, 0}}, 0.1f, 22050);
+    for (float v : loud) CHECK(v <= 1.0f && v >= -1.0f);
+    // WAV header.
+    std::vector<uint8_t> wav = encodeWav(mix, 44100);
+    CHECK(wav.size() == 44 + mix.size() * 2 && wav[0] == 'R' && wav[8] == 'W' && wav[22] == 2);
+    // Event keys with audio.
+    Skeleton sk;
+    EventDef step, beep;
+    step.name = "step";
+    beep.name = "beep";
+    beep.audioPath = "beep.wav";
+    sk.events = {step, beep};
+    Animation an;
+    setEventKey(an, 0.1f, 0, step);
+    setEventKey(an, 0.3f, 1, beep);
+    std::vector<AudioEventKey> keys = audioEventKeys(sk, an);
+    CHECK(keys.size() == 1 && keys[0].event == 1 && near(keys[0].time, 0.3f));
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -1151,6 +1202,7 @@ int main() {
     testBinaryAndRounding();
     testMerge();
     testPsd();
+    testAudioMix();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

@@ -216,6 +216,17 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float size, ImU32 col) {
         dl->AddCircleFilled(pts[n], s * 0.16f, col);
         break;
     }
+    case Icon::Audio: {  // speaker
+        ImVec2 body[4] = {P(c, s, -0.85f, -0.3f), P(c, s, -0.45f, -0.3f), P(c, s, -0.45f, 0.3f), P(c, s, -0.85f, 0.3f)};
+        dl->AddConvexPolyFilled(body, 4, col);
+        dl->AddTriangleFilled(P(c, s, -0.45f, -0.3f), P(c, s, 0.05f, -0.8f), P(c, s, 0.05f, 0.8f), col);
+        dl->AddTriangleFilled(P(c, s, -0.45f, -0.3f), P(c, s, 0.05f, 0.8f), P(c, s, -0.45f, 0.3f), col);
+        dl->PathArcTo(P(c, s, 0.05f, 0), s * 0.45f, -0.9f, 0.9f, 8);
+        dl->PathStroke(col, 0, t * 1.2f);
+        dl->PathArcTo(P(c, s, 0.05f, 0), s * 0.8f, -0.9f, 0.9f, 10);
+        dl->PathStroke(col, 0, t * 1.2f);
+        break;
+    }
     case Icon::Skin: {  // a little shirt
         ImVec2 pts[8] = {P(c, s, -0.35f, -0.8f), P(c, s, -0.9f, -0.45f), P(c, s, -0.65f, -0.05f), P(c, s, -0.45f, -0.2f),
                          P(c, s, -0.45f, 0.85f), P(c, s, 0.45f, 0.85f), P(c, s, 0.45f, -0.2f), P(c, s, 0.65f, -0.05f)};

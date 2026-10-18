@@ -1,11 +1,13 @@
 #pragma once
 #include "core/constraints.h"
 #include "core/pose.h"
+#include "platform/audio.h"
 #include "platform/texture.h"
 
 #include <imgui.h>
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -133,7 +135,7 @@ private:
 
     // --- dopesheet ---
     struct SheetRow {
-        enum Kind { Overview, Bone, Slot, Property } kind;
+        enum Kind { Overview, Bone, Slot, Property, Audio } kind;  // Audio: index = event
         int index;                                  // bone or slot (-1 for draw order / events)
         rig::Channel channel = rig::Channel::Rotate;  // Property rows
         int sub = -1;                                 // Deform rows: attachment index
@@ -210,6 +212,7 @@ private:
         float imageBgColor[3] = {0.2f, 0.2f, 0.22f};
         std::string ffmpegPath = "ffmpeg";
         bool psdIncludeHidden = true;
+        bool videoAudio = true;
     } io_;
     void drawIoDialogs();
     bool importMergePath(const std::string& path);
@@ -219,6 +222,11 @@ private:
     bool exportImagesPath(const std::string& path);
     bool resetLayout_ = false;
     rig::PhysicsState physics_;
+    std::unique_ptr<AudioPlayer> audio_;
+    bool audioOn_ = true;
+    bool wasPlaying_ = false;
+    // Starts every audio event that should be sounding at `time` (playback start, seeking).
+    void startAudioAt(float time);
     std::vector<int> activeSkins_;  // skins shown / edited (later ones win), editor state only
     void toggleSkin(int skin);
     int createSkin(const std::string& name);

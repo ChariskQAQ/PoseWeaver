@@ -16,7 +16,7 @@ using namespace rig;
 
 static constexpr size_t kMaxUndo = 200;
 
-Editor::Editor() { newProject(); }
+Editor::Editor() : audio_(std::make_unique<AudioPlayer>()) { newProject(); }
 
 Editor::~Editor() {
     for (auto& t : textures_) releaseTexture(t);
@@ -52,6 +52,11 @@ void Editor::frame(float dt) {
             }
         }
     }
+    // Audio follows playback: start sounds already in progress, stop everything on pause.
+    if (playing_ && !wasPlaying_ && playDir_ > 0) startAudioAt(time_);
+    if (!playing_ && wasPlaying_) audio_->stopAll();
+    wasPlaying_ = playing_;
+    audio_->update();
     for (auto& e : firedEvents_) e.timeLeft -= dt;
     firedEvents_.erase(std::remove_if(firedEvents_.begin(), firedEvents_.end(), [](const FiredEvent& e) { return e.timeLeft <= 0; }),
                        firedEvents_.end());
@@ -503,9 +508,26 @@ void Editor::triggerEvents(float from, float to) {
     if (!an) return;
     for (const EventKey* k : eventsInRange(*an, from, to)) {
         if (k->event < 0 || k->event >= (int)sk_.events.size()) continue;
-        std::string text = sk_.events[k->event].name;
+        const EventDef& def = sk_.events[k->event];
+        std::string text = def.name;
         if (!k->stringValue.empty()) text += " \"" + k->stringValue + "\"";
+        if (!def.audioPath.empty()) {
+            text += "  ♪";
+            if (audioOn_) audio_->play(def.audioPath, std::max(0.0f, to - k->time), def.volume, def.balance, speed_);
+        }
         firedEvents_.push_back({text, 1.2f});
+    }
+}
+
+void Editor::startAudioAt(float t) {
+    Animation* an = currentAnimation();
+    if (!an || !audioOn_) return;
+    for (const AudioEventKey& k : audioEventKeys(sk_, *an)) {
+        const EventDef& def = sk_.events[k.event];
+        const AudioSamples* s = audio_->samples(def.audioPath);
+        // Keys exactly at `t` fire through triggerEvents on the next step.
+        if (s && k.time < t && t < k.time + s->duration() / std::max(speed_, 0.01f))
+            audio_->play(def.audioPath, (t - k.time) * speed_, def.volume, def.balance, speed_);
     }
 }
 
@@ -593,6 +615,8 @@ bool Editor::openProject(const std::string& path) {
     projectPath_ = path;
     // Keep absolute image paths in memory; they are made relative again on save.
     for (auto& im : sk_.images) im.path = resolveImagePath(im.path);
+    for (auto& e : sk_.events)
+        if (!e.audioPath.empty()) e.audioPath = resolveImagePath(e.audioPath);
     reloadTextures();
     selectBone(sk_.bones.empty() ? -1 : 0);
     anim_ = sk_.animations.empty() ? -1 : 0;
@@ -611,6 +635,12 @@ static Skeleton withRelativePaths(const Skeleton& sk, const fs::path& dir) {
         fs::path rel = fs::relative(fs::u8path(im.path), dir, ec);
         // A path on another drive cannot be made relative; keep it absolute.
         if (!ec && !rel.empty() && !rel.has_root_name()) im.path = rel.generic_u8string();
+    }
+    for (auto& e : out.events) {
+        if (e.audioPath.empty()) continue;
+        std::error_code ec;
+        fs::path rel = fs::relative(fs::u8path(e.audioPath), dir, ec);
+        if (!ec && !rel.empty() && !rel.has_root_name()) e.audioPath = rel.generic_u8string();
     }
     return out;
 }
@@ -1557,6 +1587,9 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
     setColorKey(an, 0, 1.0f, Color(1, 1, 1, 1));
     EventDef peak;
     peak.name = "wave_peak";
+    // The demo's peak event plays samples/swoosh.wav when it exists next to the image.
+    fs::path swoosh = fs::absolute(fs::u8path(imagePath)).parent_path() / "swoosh.wav";
+    if (fs::exists(swoosh)) peak.audioPath = swoosh.lexically_normal().u8string();
     sk_.events.push_back(peak);
     setEventKey(an, 0.5f, 0, peak);
     // Deform: the hand end bulges outwards at the peak of the wave.

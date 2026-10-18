@@ -171,6 +171,12 @@ bool Editor::exportDataPath(const std::string& path) {
         fs::path rel = fs::relative(fs::u8path(im.path), dir, ec);
         if (!ec && !rel.empty() && !rel.has_root_name()) im.path = rel.generic_u8string();
     }
+    for (auto& e : out.events) {
+        if (e.audioPath.empty()) continue;
+        std::error_code ec;
+        fs::path rel = fs::relative(fs::u8path(e.audioPath), dir, ec);
+        if (!ec && !rel.empty() && !rel.has_root_name()) e.audioPath = rel.generic_u8string();
+    }
     ExportOptions opt;
     opt.binary = io_.dataBinary;
     opt.decimals = io_.dataDecimals;
@@ -323,8 +329,28 @@ bool Editor::exportImagesPath(const std::string& path) {
         std::snprintf(sizeArg, sizeof(sizeArg), "%dx%d", w, h);
         std::snprintf(fpsArg, sizeof(fpsArg), "%g", fps);
         std::string codec = io_.imageType == 3 ? "-c:v libx264 -pix_fmt yuv420p -crf 18" : "-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 30";
+        // Audio events mixed into one track (written next to the video, removed afterwards).
+        std::string audioInput, audioCodec;
+        fs::path wav = out.parent_path() / fs::u8path(stem + "_audio.wav");
+        if (io_.videoAudio && an) {
+            std::vector<AudioPlacement> placements;
+            for (const AudioEventKey& k : audioEventKeys(sk_, *an)) {
+                const EventDef& def = sk_.events[k.event];
+                if (const AudioSamples* s = audio_->samples(def.audioPath)) placements.push_back({s, k.time, def.volume, def.balance});
+            }
+            if (!placements.empty()) {
+                std::vector<float> mix = mixAudio(placements, frames / fps, 48000);
+                std::vector<uint8_t> bytes = encodeWav(mix, 48000);
+                std::ofstream wf(wav, std::ios::binary);
+                wf.write((const char*)bytes.data(), (std::streamsize)bytes.size());
+                if (wf) {
+                    audioInput = " -i \"" + wav.u8string() + "\" -map 0:v -map 1:a";
+                    audioCodec = io_.imageType == 3 ? " -c:a aac -b:a 192k" : " -c:a libopus -b:a 128k";
+                }
+            }
+        }
         std::string cmd = "\"" + io_.ffmpegPath + "\" -y -loglevel error -f rawvideo -pix_fmt rgba -s " + sizeArg + " -r " + fpsArg +
-                          " -i - " + codec + " \"" + out.u8string() + "\"";
+                          " -i -" + audioInput + " " + codec + audioCodec + " \"" + out.u8string() + "\"";
 #ifdef _WIN32
         cmd = "\"" + cmd + "\"";  // cmd.exe strips the outer quotes
 #endif
@@ -338,6 +364,8 @@ bool Editor::exportImagesPath(const std::string& path) {
             fwrite(img.data(), 1, img.size(), pipe);
         }
         int code = closePipe(pipe);
+        std::error_code rmEc;
+        if (!audioInput.empty()) fs::remove(wav, rmEc);
         setStatus(code == 0 ? "已导出视频 " + out.filename().u8string() + "（" + std::to_string(frames) + " 帧）" : "ffmpeg 编码失败（返回 " + std::to_string(code) + "）");
         return code == 0;
     }
@@ -431,6 +459,7 @@ void Editor::drawIoDialogs() {
         ImGui::SameLine();
         ImGui::ColorEdit3("##bg", io_.imageBgColor, ImGuiColorEditFlags_NoInputs);
         if (io_.imageType >= 3) {
+            ImGui::Checkbox("包含音频事件的声音", &io_.videoAudio);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
             ImGui::InputText("ffmpeg", &io_.ffmpegPath);
             ImGui::TextDisabled("视频由本机安装的 ffmpeg 编码（不随编辑器分发）。");

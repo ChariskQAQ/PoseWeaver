@@ -39,6 +39,16 @@ if(NOT EXISTS ${JSON_HPP_DIR}/json.hpp)
     SHOW_PROGRESS)
 endif()
 
+# --- miniaudio (single header, public domain / MIT-0) ---
+set(MINIAUDIO_DIR ${CMAKE_BINARY_DIR}/_deps/miniaudio)
+if(NOT EXISTS ${MINIAUDIO_DIR}/miniaudio.h)
+  file(DOWNLOAD
+    https://raw.githubusercontent.com/mackron/miniaudio/0.11.22/miniaudio.h
+    ${MINIAUDIO_DIR}/miniaudio.h
+    EXPECTED_HASH SHA256=9019743287e443c55e5737a7297f38e5e358561701d6db2d905afb114390c410
+    SHOW_PROGRESS)
+endif()
+
 FetchContent_MakeAvailable(glfw imgui stb)
 
 find_package(OpenGL REQUIRED)
@@ -68,6 +78,7 @@ add_library(rigcore STATIC
   src/core/raster.cpp
   src/core/merge.cpp
   src/core/psd.cpp
+  src/core/audio_mix.cpp
   src/core/serialize.cpp)
 target_include_directories(rigcore PUBLIC src ${JSON_HPP_DIR})
 
@@ -75,6 +86,7 @@ add_executable(RigEditor
   src/main.cpp
   src/platform/texture.cpp
   src/platform/file_dialog.cpp
+  src/platform/audio.cpp
   src/editor/editor.cpp
   src/editor/theme.cpp
   src/editor/icons.cpp
@@ -85,13 +97,15 @@ add_executable(RigEditor
   src/editor/panel_dopesheet.cpp
   src/editor/panel_graph.cpp
   src/editor/panel_io.cpp)
-target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR})
+target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR} ${MINIAUDIO_DIR})
 target_link_libraries(RigEditor PRIVATE rigcore imgui)
 if(WIN32)
   target_link_libraries(RigEditor PRIVATE comdlg32)
   target_compile_definitions(RigEditor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 if(MSVC)
+  # Third-party single-header implementation: keep its warnings out of the build log.
+  set_source_files_properties(src/platform/audio.cpp PROPERTIES COMPILE_OPTIONS "/W0")
   target_compile_options(rigcore PRIVATE /W4 /utf-8)
   target_compile_options(RigEditor PRIVATE /W4 /utf-8)
   set_property(TARGET RigEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

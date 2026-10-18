@@ -33,7 +33,7 @@
 | Export Images | ✅ | CPU 光栅化（双线性、混合、剪裁、超采样），PNG 序列 / 精灵表 / GIF | — | — | — |
 | Export Video | ✅ | 帧通过管道交给本机 ffmpeg：MP4 (H.264) / WebM (VP9 带透明) | — | — | — |
 | Import Project | ✅ | 合并另一个工程：骨骼/插槽/约束追加并重命名，图片按路径共用，事件/皮肤/动画按名字合并 | — | — | — |
-| 音频 | ⬜ | — | 事件关键帧 + 音频事件，时间轴显示波形，播放时同步（miniaudio） | M | 6 |
+| 音频 | ✅ | 事件音频（音量/平衡/试听），播放同步（中途开始、变速、暂停停止），Dopesheet 波形行，视频导出混入音轨 | 倒放时的音频 | S | 6 |
 
 ## 分阶段计划
 
@@ -71,8 +71,10 @@ Texture Packer、Export Images（PNG 序列/精灵表/GIF）、Export Video（ff
 Import Data / Import Project（合并）、PSD 导入。渲染用 core/raster 的软件光栅化，结果确定且可测试。
 命令行：`RigEditor --run <json|bin|atlas|png|sheet|gif|mp4|webm|merge|psd> <路径>`。
 
-### 阶段 6：音频
-事件与音频事件的播放同步、波形显示。
+### 阶段 6：音频 ✅
+miniaudio 播放与解码（WAV / MP3 / FLAC）；播放时按事件触发声音，从中途开始播放会接上已在进行的声音，
+速度改变音调，暂停即停止；Dopesheet 为每个有音频的事件画波形；导出视频时把音频事件混成一条音轨。
+波形峰值、混音和 WAV 编码在 core/audio_mix（有单元测试）。
 
 ## 风险与说明
 
