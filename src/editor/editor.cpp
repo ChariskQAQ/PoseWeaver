@@ -83,6 +83,7 @@ void Editor::frame(float dt) {
     }
     drawViewport();
     drawCloseDialog();
+    drawIoDialogs();
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
 }
 
@@ -1403,7 +1404,18 @@ void Editor::drawMenuBar() {
         if (ImGui::MenuItem("另存为...", "Ctrl+Shift+S")) saveProject(true);
         ImGui::Separator();
         if (ImGui::MenuItem("导入图片...", "Ctrl+I")) importImageDialog();
-        if (ImGui::MenuItem("导出运行时 JSON...")) exportRuntimeJson();
+        if (ImGui::MenuItem("导入 PSD...")) io_.open = IoState::Psd;
+        if (ImGui::MenuItem("导入工程 / 数据（合并）...")) {
+            std::string path = openFileDialog("RigEditor 工程或数据 (*.rig.json;*.json;*.rigb)", "*.rig.json;*.json;*.rigb");
+            if (!path.empty()) importMergePath(path);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("导出数据 (JSON / 二进制)...")) io_.open = IoState::Data;
+        if (ImGui::MenuItem("纹理打包...")) io_.open = IoState::Atlas;
+        if (ImGui::MenuItem("导出图片 / GIF / 视频...")) {
+            io_.imageAnim = anim_;
+            io_.open = IoState::Images;
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("编辑")) {

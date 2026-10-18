@@ -66,6 +66,10 @@ public:
     // scenario: "" (Animate at `time`), "weights", "mesh" (mesh tool), "clip" (adds a clipping slot).
     void buildDemo(const std::string& imagePath, float time, const std::string& scenario);
     // Brings the Graph tab to front with the first rotate key of the selected bone selected.
+    // Import / export without dialogs (also used by the command line). type: json, bin, atlas,
+    // png, sheet, gif, mp4, webm (export) or merge, psd (import).
+    bool runExport(const std::string& type, const std::string& path);
+    const std::string& status() const { return status_; }
     void focusGraph() {
         focusGraph_ = 3;
         graphCurve_ = 0;
@@ -190,6 +194,29 @@ private:
     bool showCloseDialog_ = false;
     bool closeConfirmed_ = false;
     bool showDemo_ = false;
+
+    // --- import / export dialogs ---
+    struct IoState {
+        enum Dialog { None, Data, Atlas, Images, Psd } open = None, openPopup = None;
+        bool dataBinary = false, dataPretty = true;
+        int dataDecimals = -1;
+        int atlasMaxSize = 2048, atlasPadding = 2;
+        bool atlasTrim = true, atlasRotate = false, atlasPow2 = false;
+        int imageType = 0;  // 0 png sequence, 1 sprite sheet, 2 gif, 3 mp4, 4 webm
+        int imageAnim = -1;
+        float imageScale = 1.0f, imageFps = 30;
+        int imageSupersample = 2, imagePadding = 8;
+        bool imageBackground = false;
+        float imageBgColor[3] = {0.2f, 0.2f, 0.22f};
+        std::string ffmpegPath = "ffmpeg";
+        bool psdIncludeHidden = true;
+    } io_;
+    void drawIoDialogs();
+    bool importMergePath(const std::string& path);
+    bool importPsdPath(const std::string& path, bool includeHidden);
+    bool exportDataPath(const std::string& path);
+    bool exportAtlasPath(const std::string& path);
+    bool exportImagesPath(const std::string& path);
     bool resetLayout_ = false;
     rig::PhysicsState physics_;
     std::vector<int> activeSkins_;  // skins shown / edited (later ones win), editor state only

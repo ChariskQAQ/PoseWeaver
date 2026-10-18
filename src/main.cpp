@@ -45,6 +45,7 @@ struct Options {
     std::string scenario;      // --weights | --mesh | --clip
     bool demoGraph = false;    // --graph
     std::string screenshot;  // --screenshot <png>: save after a few frames and exit
+    std::vector<std::pair<std::string, std::string>> runs;  // --run <type> <path>: import/export, then exit
 };
 
 static Options parseArgs(int argc, char** argv) {
@@ -57,6 +58,10 @@ static Options parseArgs(int argc, char** argv) {
         else if (a == "--weights" || a == "--mesh" || a == "--clip" || a == "--ik" || a == "--path" || a == "--ghost" || a == "--bake" || a == "--skin") o.scenario = a.substr(2);
         else if (a == "--graph") o.demoGraph = true;
         else if (a == "--screenshot") o.screenshot = next();
+        else if (a == "--run") {
+            std::string type = next();
+            o.runs.push_back({type, next()});
+        }
         else o.open = a;
     }
     return o;
@@ -103,6 +108,23 @@ int main(int argc, char** argv) {
         glfwSetDropCallback(window, onDrop);
         if (!opt.demoImage.empty()) editor.buildDemo(opt.demoImage, opt.demoTime, opt.scenario);
         if (opt.demoGraph) editor.focusGraph();
+        if (!opt.runs.empty()) {
+            int failed = 0;
+            for (auto& [type, path] : opt.runs) {
+                bool ok = editor.runExport(type, path);
+                failed += !ok;
+                std::printf("%s %s: %s\n", ok ? "ok" : "FAILED", type.c_str(), editor.status().c_str());
+            }
+            if (opt.screenshot.empty()) {
+                g_editor = nullptr;
+                ImGui_ImplOpenGL3_Shutdown();
+                ImGui_ImplGlfw_Shutdown();
+                ImGui::DestroyContext();
+                glfwDestroyWindow(window);
+                glfwTerminate();
+                return failed ? 1 : 0;
+            }
+        }
         else if (!opt.open.empty()) editor.onFilesDropped({opt.open});
         int frameCount = 0;
 

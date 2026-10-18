@@ -3,6 +3,7 @@
 #include <json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -191,7 +192,7 @@ static Attachment attachmentFrom(const json& ja) {
     return a;
 }
 
-std::string toJson(const Skeleton& sk, int indent) {
+static json toDocument(const Skeleton& sk) {
     json root;
     root["format"] = "rig";
     root["version"] = kFormatVersion;
@@ -333,7 +334,38 @@ std::string toJson(const Skeleton& sk, int indent) {
         anims.push_back(ja);
     }
     root["animations"] = anims;
-    return root.dump(indent);
+    return root;
+}
+
+// Rounds every float in the document (smaller files; the shortest repr is printed).
+static void roundFloats(json& j, int decimals) {
+    if (decimals < 0) return;
+    double scale = std::pow(10.0, decimals);
+    if (j.is_number_float()) {
+        j = std::round(j.get<double>() * scale) / scale;
+    } else if (j.is_array() || j.is_object()) {
+        for (auto& child : j) roundFloats(child, decimals);
+    }
+}
+
+std::string toJson(const Skeleton& sk, int indent) { return toDocument(sk).dump(indent); }
+
+std::string toJson(const Skeleton& sk, const ExportOptions& options) {
+    json doc = toDocument(sk);
+    roundFloats(doc, options.decimals);
+    return doc.dump(options.indent);
+}
+
+static const uint8_t kBinaryMagic[4] = {'R', 'I', 'G', 'B'};
+
+std::vector<uint8_t> toBinary(const Skeleton& sk, int decimals) {
+    json doc = toDocument(sk);
+    roundFloats(doc, decimals);
+    std::vector<uint8_t> body = json::to_msgpack(doc);
+    std::vector<uint8_t> out(kBinaryMagic, kBinaryMagic + 4);
+    out.push_back((uint8_t)kFormatVersion);
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
 }
 
 static bool validate(const Skeleton& sk, std::string* error) {
@@ -411,9 +443,32 @@ static bool validate(const Skeleton& sk, std::string* error) {
     return true;
 }
 
+static bool fromDocument(const json& root, Skeleton& out, std::string* error);
+
 bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
     try {
-        json root = json::parse(text);
+        return fromDocument(json::parse(text), out, error);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool fromBinary(const std::vector<uint8_t>& data, Skeleton& out, std::string* error) {
+    if (data.size() < 5 || !std::equal(kBinaryMagic, kBinaryMagic + 4, data.begin())) {
+        if (error) *error = "not a binary rig file";
+        return false;
+    }
+    try {
+        return fromDocument(json::from_msgpack(data.begin() + 5, data.end()), out, error);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+static bool fromDocument(const json& root, Skeleton& out, std::string* error) {
+    try {
         if (root.value("format", std::string()) != "rig") {
             if (error) *error = "not a rig file";
             return false;
@@ -579,6 +634,21 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
     }
 }
 
+bool exportFile(const std::string& path, const Skeleton& sk, const ExportOptions& options, std::string* error) {
+    std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
+    if (!f) {
+        if (error) *error = "cannot open file for writing";
+        return false;
+    }
+    if (options.binary) {
+        std::vector<uint8_t> data = toBinary(sk, options.decimals);
+        f.write((const char*)data.data(), (std::streamsize)data.size());
+    } else {
+        f << toJson(sk, options);
+    }
+    return (bool)f;
+}
+
 bool saveFile(const std::string& path, const Skeleton& sk, std::string* error) {
     std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
     if (!f) {
@@ -597,7 +667,10 @@ bool loadFile(const std::string& path, Skeleton& out, std::string* error) {
     }
     std::stringstream ss;
     ss << f.rdbuf();
-    return fromJson(ss.str(), out, error);
+    std::string data = ss.str();
+    if (data.size() >= 4 && std::equal(kBinaryMagic, kBinaryMagic + 4, (const uint8_t*)data.data()))
+        return fromBinary(std::vector<uint8_t>(data.begin(), data.end()), out, error);
+    return fromJson(data, out, error);
 }
 
 } // namespace rig

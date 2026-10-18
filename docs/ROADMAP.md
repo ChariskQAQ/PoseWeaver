@@ -16,8 +16,8 @@
 | Dopesheet | 🟡 | 总览/骨骼/属性行、单选/Ctrl 多选/框选/Ctrl+A、整体拖动、Del 删除、Ctrl+C/V 复制粘贴、曲线预设、锁定 | 框选边缘拖动按比例缩放关键帧 | S | 1 |
 | 权重 | ✅ | 绑定、自动权重、笔刷、锁定骨骼、数值设置、平滑、修剪、按骨骼名左右镜像 | — | — | — |
 | 网格 | ✅ | 按图片轮廓自动生成、外轮廓+内部点、约束 Delaunay 三角化、Alt+点击加顶点、Del 删除、UV 跟随/变形模式 | — | — | — |
-| Export Data | 🟡 | 导出自有格式 JSON | 二进制格式、导出选项（精度、是否带非必要数据）、附带最小运行时 | M | 5 |
-| Import Data | 🟡 | 打开自有 JSON | 导入到当前工程（合并骨架）、从 PSD 图层导入（按图层位置建插槽） | M | 5 |
+| Export Data | ✅ | JSON（缩进/紧凑、浮点精度）与二进制 .rigb（RIGB 头 + MessagePack），图片路径相对化；core/ 即运行时 | — | — | — |
+| Import Data | ✅ | 合并导入 JSON/二进制数据；PSD 导入（8 位 RGB、RLE、Unicode 名、图层组、隐藏图层） | — | — | — |
 | Graph | 🟡 | 骨骼通道曲线（旋转/移动/缩放/斜切）、拖动关键帧改时间与数值、贝塞尔手柄、预设 | 插槽颜色曲线、缩放/平移视图、多选关键帧、X/Y 分开的曲线 | M | 1 |
 | Bone/Image Compensation | ✅ | 工具栏“补偿 → 骨骼/图片”：子骨骼（Animate 模式自动打帧）和附件保持原位 | 已绑定网格的图片补偿 | S | 1 |
 | Ghosting | ✅ | Dopesheet 工具栏开关，前（红）后（绿）帧半透明叠加，帧数/间隔/不透明度可调 | — | — | — |
@@ -29,10 +29,10 @@
 | 路径约束 | ✅ | 路径附件（贝塞尔，开/闭合，网格工具编辑），位置/间距/旋转模式，可打关键帧 | 路径附件的权重绑定编辑体验、恒速开关 | S | 3 |
 | 物理约束 | ✅ | 弹簧-阻尼模拟（惯性、强度、阻尼、质量、上限、风、重力），实时预览，可烘焙为关键帧 | — | — | — |
 | 皮肤 | ✅ | 皮肤占位 + 皮肤条目、多皮肤组合（后激活优先）、皮肤专用骨骼/约束、移入皮肤/复制/换图工作流 | 不同皮肤拓扑不同时的独立变形关键帧 | S | 4 |
-| Texture Packer | ⬜ | — | 图集打包（MaxRects，旋转、裁透明边、多页），导出 atlas + 页 PNG | M | 5 |
-| Export Images | ⬜ | — | 离屏渲染动画为 PNG 序列 / 精灵表 / GIF | M | 5 |
-| Export Video | ⬜ | — | 离屏渲染后调用用户本机的 ffmpeg 编码 MP4/WebM（不打包 ffmpeg） | M | 5 |
-| Import Project | ⬜ | — | 把另一个工程的骨架、动画、图片合并进当前工程（重名处理） | S | 5 |
+| Texture Packer | ✅ | MaxRects（最短边优先）、裁透明边、间距、旋转、2 的幂、多页，输出 .atlas + 页 PNG | — | — | — |
+| Export Images | ✅ | CPU 光栅化（双线性、混合、剪裁、超采样），PNG 序列 / 精灵表 / GIF | — | — | — |
+| Export Video | ✅ | 帧通过管道交给本机 ffmpeg：MP4 (H.264) / WebM (VP9 带透明) | — | — | — |
+| Import Project | ✅ | 合并另一个工程：骨骼/插槽/约束追加并重命名，图片按路径共用，事件/皮肤/动画按名字合并 | — | — | — |
 | 音频 | ⬜ | — | 事件关键帧 + 音频事件，时间轴显示波形，播放时同步（miniaudio） | M | 6 |
 
 ## 分阶段计划
@@ -66,8 +66,10 @@
 这样附件切换 / 变形关键帧仍按插槽附件索引工作，旧工程无需迁移。工程格式升级为 version 5。
 已知限制：变形关键帧按占位记录，多个皮肤的网格拓扑不同时只对顶点数相同的皮肤生效。
 
-### 阶段 5：导入导出
-Texture Packer、Export Images、Export Video、二进制导出、Import Data / Import Project、PSD 导入。
+### 阶段 5：导入导出 ✅
+Texture Packer、Export Images（PNG 序列/精灵表/GIF）、Export Video（ffmpeg）、二进制导出、
+Import Data / Import Project（合并）、PSD 导入。渲染用 core/raster 的软件光栅化，结果确定且可测试。
+命令行：`RigEditor --run <json|bin|atlas|png|sheet|gif|mp4|webm|merge|psd> <路径>`。
 
 ### 阶段 6：音频
 事件与音频事件的播放同步、波形显示。

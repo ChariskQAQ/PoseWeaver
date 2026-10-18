@@ -1,10 +1,15 @@
 // Minimal self-checking tests for rigcore (no framework dependency).
+#include "core/atlas.h"
 #include "core/clipping.h"
+#include "core/merge.h"
+#include "core/psd.h"
+#include "core/raster.h"
 #include "core/constraints.h"
 #include "core/mesh_tools.h"
 #include "core/pose.h"
 #include "core/serialize.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -834,6 +839,253 @@ static void testSkins() {
     CHECK(sk.skins[1].bones.empty());
 }
 
+static std::vector<unsigned char> solidImage(int w, int h, unsigned char r, unsigned char g, unsigned char b, int border) {
+    std::vector<unsigned char> px(size_t(w) * h * 4, 0);
+    for (int y = border; y < h - border; ++y)
+        for (int x = border; x < w - border; ++x) {
+            unsigned char* p = &px[(size_t(y) * w + x) * 4];
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+            p[3] = 255;
+        }
+    return px;
+}
+
+static void testAtlas() {
+    auto a = solidImage(40, 30, 255, 0, 0, 5);  // 30x20 opaque inside a transparent border
+    auto b = solidImage(64, 64, 0, 255, 0, 0);
+    auto c = solidImage(10, 50, 0, 0, 255, 0);
+    std::vector<AtlasInput> in = {{"a", 40, 30, a.data()}, {"b", 64, 64, b.data()}, {"c", 10, 50, c.data()}};
+    AtlasSettings st;
+    st.maxWidth = st.maxHeight = 256;
+    Atlas atlas;
+    std::string err;
+    CHECK(packAtlas(in, st, atlas, &err));
+    CHECK(atlas.pages.size() == 1 && atlas.regions.size() == 3);
+    const AtlasRegion& ra = atlas.regions[0];
+    CHECK(ra.width == 30 && ra.height == 20 && ra.offsetX == 5 && ra.offsetY == 5 && ra.originalWidth == 40);
+    // No overlaps (padding included) and pixels copied.
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = i + 1; j < 3; ++j) {
+            const AtlasRegion &p = atlas.regions[i], &q = atlas.regions[j];
+            bool apart = p.x + p.width + st.padding <= q.x || q.x + q.width + st.padding <= p.x || p.y + p.height + st.padding <= q.y ||
+                         q.y + q.height + st.padding <= p.y;
+            CHECK(apart);
+        }
+    const AtlasPage& page = atlas.pages[0];
+    const unsigned char* px = &page.rgba[(size_t(ra.y) * page.width + ra.x) * 4];
+    CHECK(px[0] == 255 && px[1] == 0 && px[3] == 255);
+    // Small pages spill onto a second page.
+    st.maxWidth = st.maxHeight = 72;
+    CHECK(packAtlas(in, st, atlas, &err));
+    CHECK(atlas.pages.size() >= 2);
+    // Too large for a page.
+    st.maxWidth = st.maxHeight = 32;
+    CHECK(!packAtlas(in, st, atlas, &err));
+    // Rotation lets a tall image fit a wide page.
+    AtlasSettings rot;
+    rot.maxWidth = 64;
+    rot.maxHeight = 20;
+    rot.allowRotate = true;
+    rot.padding = 0;
+    CHECK(packAtlas({{"c", 10, 50, c.data()}}, rot, atlas, &err));
+    CHECK(atlas.regions[0].rotated && atlas.regions[0].width == 50);
+    CHECK(atlasText(atlas, {"page.png"}).find("rotate: true") != std::string::npos);
+}
+
+static void testRaster() {
+    // A 20x20 red region at the origin rendered into a 40x40 target (1 world unit = 1 pixel).
+    Skeleton sk;
+    sk.addBone("root", -1, {}, 0);
+    sk.images.push_back({"red.png", 20, 20});
+    Slot s;
+    s.bone = 0;
+    Attachment a;
+    a.image = 0;
+    s.attachments.push_back(a);
+    s.activeAttachment = 0;
+    s.color = Color(1, 1, 1, 0.5f);
+    sk.slots.push_back(s);
+    auto red = solidImage(20, 20, 255, 0, 0, 0);
+    std::vector<RasterTexture> tex = {{20, 20, red.data()}};
+    Pose pose = makeSetupPose(sk);
+    Vec2 lo, hi;
+    CHECK(poseBounds(sk, pose, lo, hi) && near(lo, {-10, -10}) && near(hi, {10, 10}));
+    Affine toPx{1, 0, 0, -1, 20, 20};
+    std::vector<unsigned char> img;
+    renderPose(sk, pose, tex, toPx, 40, 40, img);
+    const unsigned char* centre = &img[(size_t(20) * 40 + 20) * 4];
+    CHECK(centre[0] == 255 && centre[1] == 0 && std::abs(centre[3] - 128) <= 1);
+    CHECK(img[(size_t(2) * 40 + 2) * 4 + 3] == 0);
+    // Supersampling: 2x render then downsample keeps the size and colour.
+    std::vector<unsigned char> big;
+    renderPose(sk, pose, tex, Affine{2, 0, 0, -2, 40, 40}, 80, 80, big);
+    std::vector<unsigned char> small = downsample(big, 80, 80, 2);
+    CHECK(small.size() == img.size() && small[(size_t(20) * 40 + 20) * 4] == 255);
+    // GIF: header, loop extension, trailer.
+    std::vector<uint8_t> gif = encodeGif({img, img}, 40, 40, 4, true);
+    CHECK(gif.size() > 800 && std::string(gif.begin(), gif.begin() + 6) == "GIF89a" && gif.back() == 0x3B);
+    CHECK(std::search(gif.begin(), gif.end(), std::begin("NETSCAPE2.0"), std::end("NETSCAPE2.0") - 1) != gif.end());
+}
+
+static void testBinaryAndRounding() {
+    Skeleton sk = makeMeshRig();
+    convertRegionToMesh(sk.slots[0].attachments[0], sk.images[0], nullptr, 2, 3);
+    sk.bones[1].setup.rotation = 33.333333f;
+    Animation an;
+    an.name = "a";
+    setRotateKey(an, 1, 0.5f, 12.3456f);
+    sk.animations.push_back(an);
+    std::vector<uint8_t> bin = toBinary(sk);
+    CHECK(bin.size() > 5 && bin[0] == 'R' && bin[3] == 'B');
+    Skeleton loaded;
+    std::string err;
+    CHECK(fromBinary(bin, loaded, &err));
+    CHECK(toJson(loaded) == toJson(sk));
+    CHECK(bin.size() < toJson(sk, -1).size());
+    ExportOptions opt;
+    opt.decimals = 2;
+    opt.indent = -1;
+    std::string rounded = toJson(sk, opt);
+    CHECK(rounded.find("33.33") != std::string::npos && rounded.find("33.333") == std::string::npos);
+    CHECK(fromJson(rounded, loaded, &err));
+}
+
+static void testMerge() {
+    Skeleton a = makeMeshRig();
+    Animation wave;
+    wave.name = "wave";
+    setRotateKey(wave, 1, 0, 10);
+    a.animations.push_back(wave);
+    EventDef e;
+    e.name = "hit";
+    a.events.push_back(e);
+    Skeleton b = a;  // same names everywhere
+    b.animations[0].bones.clear();
+    setRotateKey(b.animations[0], 2, 0.5f, 20);
+    setDrawOrderKey(b.animations[0], 0.25f, {0});
+    Animation jump;
+    jump.name = "jump";
+    setEventKey(jump, 0.1f, 0, e);
+    b.animations.push_back(jump);
+    Constraint ik;
+    ik.name = "ik";
+    ik.bones = {1, 2};
+    ik.target = 0;
+    b.constraints.push_back(ik);
+    std::string report = mergeSkeleton(a, b);
+    CHECK(!report.empty());
+    CHECK(a.bones.size() == 6 && a.bones[3].name == "root2" && a.bones[4].parent == 3);
+    CHECK(a.slots.size() == 2 && a.slots[1].bone == 3 && a.slots[1].name != a.slots[0].name);
+    CHECK(a.images.size() == 1 && a.events.size() == 1);
+    CHECK(a.animations.size() == 2);
+    CHECK(a.animations[0].bones.count(1) && a.animations[0].bones.count(5));  // merged "wave": old bone 1 + imported bone 2 -> 5
+    CHECK(a.animations[1].events.size() == 1 && a.animations[1].events[0].event == 0);
+    CHECK(a.constraints.size() == 1 && a.constraints[0].bones[0] == 4 && a.constraints[0].target == 3);
+    CHECK((a.animations[0].drawOrder[0].order == std::vector<int>{0, 1}));
+    // The merged skeleton is valid.
+    Skeleton check;
+    std::string err;
+    CHECK(fromJson(toJson(a), check, &err));
+}
+
+// Minimal PSD writer for the parser test (8-bit RGB, one raw and one RLE layer).
+struct BeWriter {
+    std::vector<uint8_t> b;
+    void u8(int v) { b.push_back((uint8_t)v); }
+    void u16(int v) { u8(v >> 8); u8(v); }
+    void u32(uint32_t v) { u16(v >> 16); u16(v & 0xFFFF); }
+    void str(const std::string& s) { b.insert(b.end(), s.begin(), s.end()); }
+};
+
+static void testPsd() {
+    BeWriter w;
+    w.str("8BPS");
+    w.u16(1);
+    for (int i = 0; i < 6; ++i) w.u8(0);
+    w.u16(4);
+    w.u32(10);  // height
+    w.u32(20);  // width
+    w.u16(8);
+    w.u16(3);
+    w.u32(0);  // colour mode data
+    w.u32(0);  // image resources
+    // Channel data for both layers.
+    BeWriter data;
+    auto rawChannel = [&](int value, int n) {
+        data.u16(0);
+        for (int i = 0; i < n; ++i) data.u8(value);
+    };
+    // Layer 1 (bottom, "背景"): 4x2 at (1,2), raw, channels R G B A.
+    for (int v : {200, 100, 50, 255}) rawChannel(v, 8);
+    // Layer 2 (top, "hat"): 3x2 at (10,5), RLE rows of "repeat 3x value".
+    auto rleChannel = [&](int value) {
+        data.u16(1);
+        data.u16(2);
+        data.u16(2);
+        for (int row = 0; row < 2; ++row) {
+            data.u8(0xFE);  // -2: repeat next byte 3 times
+            data.u8(value);
+        }
+    };
+    for (int v : {10, 20, 30, 128}) rleChannel(v);
+    BeWriter layers;
+    layers.u16(2);
+    auto record = [&](int top, int left, int bottom, int right, const std::string& name, int chLen, bool hidden,
+                      const std::string& unicode) {
+        layers.u32(top);
+        layers.u32(left);
+        layers.u32(bottom);
+        layers.u32(right);
+        layers.u16(4);
+        for (int id : {0, 1, 2, -1}) {
+            layers.u16(id & 0xFFFF);
+            layers.u32(chLen);
+        }
+        layers.str("8BIMnorm");
+        layers.u8(255);
+        layers.u8(0);
+        layers.u8(hidden ? 0x02 : 0x00);
+        layers.u8(0);
+        BeWriter extra;
+        extra.u32(0);
+        extra.u32(0);
+        extra.u8((int)name.size());
+        extra.str(name);
+        while ((extra.b.size() - 8) % 4) extra.u8(0);
+        if (!unicode.empty()) {  // "luni" block with UTF-16BE characters
+            std::vector<uint16_t> units = {0x80CC, 0x666F};  // 背景
+            extra.str("8BIMluni");
+            extra.u32(4 + (uint32_t)units.size() * 2);
+            extra.u32((uint32_t)units.size());
+            for (uint16_t u : units) extra.u16(u);
+        }
+        layers.u32((uint32_t)extra.b.size());
+        layers.b.insert(layers.b.end(), extra.b.begin(), extra.b.end());
+    };
+    record(2, 1, 4, 5, "bg", 2 + 8, false, "yes");
+    record(5, 10, 7, 13, "hat", 2 + 4 + 4, true, "");
+    layers.b.insert(layers.b.end(), data.b.begin(), data.b.end());
+    w.u32((uint32_t)layers.b.size() + 4);
+    w.u32((uint32_t)layers.b.size());
+    w.b.insert(w.b.end(), layers.b.begin(), layers.b.end());
+
+    PsdDocument doc;
+    std::string err;
+    CHECK(parsePsd(w.b, doc, &err));
+    CHECK(doc.width == 20 && doc.height == 10 && doc.layers.size() == 2);
+    const PsdLayer& bg = doc.layers[0];
+    CHECK(bg.name == "\xE8\x83\x8C\xE6\x99\xAF" && bg.left == 1 && bg.top == 2 && bg.width == 4 && bg.height == 2 && bg.visible);
+    CHECK(bg.rgba[0] == 200 && bg.rgba[1] == 100 && bg.rgba[2] == 50 && bg.rgba[3] == 255);
+    const PsdLayer& hat = doc.layers[1];
+    CHECK(hat.name == "hat" && !hat.visible && hat.width == 3);
+    CHECK(hat.rgba[(1 * 3 + 2) * 4 + 0] == 10 && hat.rgba[(1 * 3 + 2) * 4 + 3] == 128);
+    std::vector<uint8_t> bad = w.b;
+    bad[0] = 'X';
+    CHECK(!parsePsd(bad, doc, &err));
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -894,6 +1146,11 @@ int main() {
     testCopyPaste();
     testMirrorWeights();
     testSkins();
+    testAtlas();
+    testRaster();
+    testBinaryAndRounding();
+    testMerge();
+    testPsd();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

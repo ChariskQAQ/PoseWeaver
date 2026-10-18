@@ -17,7 +17,9 @@
 - 时间轴：多动画、播放/倒放/循环/变速；Dopesheet 多选/框选、整体拖动、复制粘贴、右键改曲线；洋葱皮
 - Graph 曲线编辑：贝塞尔手柄、缓入缓出等预设
 - 斜切、插槽颜色关键帧、绘制顺序关键帧、事件（播放时在视口提示）
-- 撤销/重做、保存/打开工程（`.rig.json`）、导出运行时 JSON
+- 撤销/重做、保存/打开工程（`.rig.json`）
+- 导出：数据（JSON / 二进制 .rigb）、纹理打包（.atlas）、PNG 序列 / 精灵表 / GIF、视频（MP4 / WebM，需本机 ffmpeg）
+- 导入：PSD（按图层建插槽）、合并另一个工程或数据文件
 
 待做功能与开发顺序见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
@@ -39,7 +41,7 @@ build\Release\RigEditor.exe --demo samples\arm.png        :: 两骨骼蒙皮手�
 build\Release\RigEditor.exe path\to\project.rig.json
 ```
 
-`--weights` / `--mesh` / `--clip` / `--ik` / `--path` / `--ghost` / `--bake` / `--skin` 以对应场景打开 demo（`--skin` 需要 `samples/arm_alt.png`），`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
+`--weights` / `--mesh` / `--clip` / `--ik` / `--path` / `--ghost` / `--bake` / `--skin` 以对应场景打开 demo（`--skin` 需要 `samples/arm_alt.png`），`--run <类型> <路径>` 无界面导入/导出后退出（类型：json、bin、atlas、png、sheet、gif、mp4、webm、merge、psd），`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
 
 ## 界面
 

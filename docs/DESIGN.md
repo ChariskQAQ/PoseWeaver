@@ -19,7 +19,14 @@
 | `src/core/model.h/.cpp` | 文档数据：`Skeleton`、`Bone`、`Slot`、`Attachment`、`Animation` |
 | `src/core/pose.h/.cpp` | 运行时求值：采样动画 → 本地变换 → 世界矩阵 → 网格顶点（蒙皮） |
 | `src/core/mesh_tools.h/.cpp` | 生成网格、绑定骨骼、自动权重、权重笔刷 |
-| `src/core/serialize.h/.cpp` | JSON 读写（工程文件 = 导出格式） |
+| `src/core/mesh_edit.cpp` | 轮廓追踪、约束 Delaunay 三角化、增删顶点 |
+| `src/core/clipping.h/.cpp` | 剪裁多边形分解与三角形裁剪 |
+| `src/core/constraints.h/.cpp` | IK / 变换 / 路径 / 物理约束 |
+| `src/core/serialize.h/.cpp` | JSON / 二进制读写（工程文件 = 导出格式） |
+| `src/core/merge.h/.cpp` | 合并导入另一个工程 |
+| `src/core/atlas.h/.cpp` | 纹理打包（MaxRects） |
+| `src/core/raster.h/.cpp` | CPU 光栅化（导出图片/视频）与 GIF 编码 |
+| `src/core/psd.h/.cpp` | PSD 图层读取 |
 | `src/editor/*` | 编辑器状态、撤销栈、工具、各面板 UI；骨骼/网格/权重/关键帧都通过 ImDrawList 绘制 |
 | `src/platform/*` | 纹理加载、文件对话框 |
 
