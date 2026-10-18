@@ -19,6 +19,7 @@
 - 斜切、插槽颜色关键帧、绘制顺序关键帧、事件（播放时在视口提示）
 - 混合预览：4 条轨道叠加播放，同轨道切换时淡入淡出（默认或按动画对设置时长）、队列、轨道权重、淡出到下层
 - 音频：事件可挂 WAV / MP3 / FLAC，播放时同步发声，Dopesheet 显示波形，导出视频带声音
+- 启动页（类似 Blender）：新建 / 从图片或 PSD 新建 / 示例、最近打开的文件、恢复上次的会话、快捷键；设置保存在 `%APPDATA%\RigEditor`
 - 撤销/重做、保存/打开工程（`.rig.json`）
 - 导出：数据（JSON / 二进制 .rigb）、纹理打包（.atlas，可缩放 / 自动缩放到一页）、PNG / JPG 序列、精灵表、GIF、视频（MP4 / WebM / AVI / QuickTime MOV，需本机 ffmpeg）
 - 导入：PSD（按图层建插槽）、合并另一个工程或数据文件
@@ -43,7 +44,7 @@ build\Release\RigEditor.exe --demo samples\arm.png        :: 两骨骼蒙皮手�
 build\Release\RigEditor.exe path\to\project.rig.json
 ```
 
-`--weights` / `--mesh` / `--clip` / `--ik` / `--path` / `--ghost` / `--bake` / `--skin` / `--mix` 以对应场景打开 demo（`--skin` 需要 `samples/arm_alt.png`），`--run <类型> <路径>` 无界面导入/导出后退出（类型：json、bin、atlas、png、jpg、sheet、gif、mp4、webm、avi、mov、merge、psd），`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
+`--weights` / `--mesh` / `--clip` / `--ik` / `--path` / `--ghost` / `--bake` / `--skin` / `--mix` 以对应场景打开 demo（`--skin` 需要 `samples/arm_alt.png`），`--run <类型> <路径>` 无界面导入/导出后退出（类型：json、bin、atlas、png、jpg、sheet、gif、mp4、webm、avi、mov、merge、psd），`--splash` 强制显示启动页，`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
 
 ## 界面
 

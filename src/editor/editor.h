@@ -68,6 +68,11 @@ public:
     void onFilesDropped(const std::vector<std::string>& paths);
     void setUiScale(float s) { uiScale_ = s; }
     bool openProject(const std::string& path);
+    // Start-up splash (splash.cpp).
+    void openSplash() { splashRequest_ = true; }
+    bool splashEnabled() const { return settings_.showSplash; }
+    // On quit: keeps the current skeleton as the "restore last session" file.
+    void saveSession();
     // Builds a two-bone skinned arm with a "wave" animation from `imagePath`.
     // scenario: "" (Animate at `time`), "weights", "mesh" (mesh tool), "clip" (adds a clipping slot).
     void buildDemo(const std::string& imagePath, float time, const std::string& scenario);
@@ -254,6 +259,19 @@ private:
     int focusWeights_ = 0;
     int focusGraph_ = 0;
     int focusPreview_ = 0;
+    // Persistent user settings (settings.json in the per-user config folder).
+    struct AppSettings {
+        std::vector<std::string> recent;  // most recent first
+        bool showSplash = true;
+    } settings_;
+    bool splashRequest_ = false, showShortcuts_ = false;
+    void loadSettings();
+    void saveSettings();
+    void addRecent(const std::string& path);
+    std::string sessionPath() const;
+    std::string findSample(const std::string& name) const;
+    void drawSplash();
+    void drawShortcuts();
     // Mix preview (Animate mode): an AnimationState with up to kMixTracks tracks drives the viewport.
     static constexpr int kMixTracks = 4;
     rig::AnimationState mixState_;

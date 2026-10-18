@@ -16,7 +16,10 @@ using namespace rig;
 
 static constexpr size_t kMaxUndo = 200;
 
-Editor::Editor() : audio_(std::make_unique<AudioPlayer>()) { newProject(); }
+Editor::Editor() : audio_(std::make_unique<AudioPlayer>()) {
+    newProject();
+    loadSettings();
+}
 
 Editor::~Editor() {
     for (auto& t : textures_) releaseTexture(t);
@@ -93,6 +96,8 @@ void Editor::frame(float dt) {
     }
     drawViewport();
     drawCloseDialog();
+    drawSplash();
+    drawShortcuts();
     drawIoDialogs();
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
 }
@@ -638,6 +643,7 @@ bool Editor::openProject(const std::string& path) {
     if (!sk_.skins.empty()) activeSkins_ = {0};
     dirty_ = false;
     frameAllIn_ = 5;
+    addRecent(path);
     setStatus("已打开 " + fs::u8path(path).filename().u8string());
     return true;
 }
@@ -674,6 +680,7 @@ bool Editor::saveProject(bool saveAs) {
     }
     projectPath_ = path;
     dirty_ = false;
+    addRecent(path);
     setStatus("已保存 " + fs::u8path(path).filename().u8string());
     return true;
 }
@@ -1480,14 +1487,8 @@ void Editor::drawMenuBar() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("帮助")) {
-        ImGui::TextUnformatted(
-            "Tab        Setup / Animate 模式\n"
-            "C / V / X / Z  旋转 / 移动 / 缩放 / 斜切\n"
-            "B / N / G  姿势 / 建骨骼 / 权重      M 网格\n"
-            "右键拖动平移，滚轮缩放；右键单击切回上一个工具\n"
-            "F 适配骨架，Ctrl+F 100%，Esc 取消选择\n"
-            "Animate：空格 播放，K 为所有改动打帧，← → 逐帧\n"
-            "把 PNG 拖进窗口即可导入");
+        if (ImGui::MenuItem("启动页...")) openSplash();
+        if (ImGui::MenuItem("快捷键...")) showShortcuts_ = true;
         ImGui::EndMenu();
     }
     std::string title = projectPath_.empty() ? "未命名" : fs::u8path(projectPath_).filename().u8string();

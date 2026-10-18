@@ -98,6 +98,7 @@ add_executable(RigEditor
   src/editor/panel_dopesheet.cpp
   src/editor/panel_graph.cpp
   src/editor/panel_mix.cpp
+  src/editor/splash.cpp
   src/editor/panel_io.cpp)
 target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR} ${MINIAUDIO_DIR})
 target_link_libraries(RigEditor PRIVATE rigcore imgui)

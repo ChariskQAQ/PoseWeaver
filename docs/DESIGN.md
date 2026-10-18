@@ -30,6 +30,7 @@
 | `src/core/psd.h/.cpp` | PSD 图层读取 |
 | `src/core/audio_mix.h/.cpp` | 波形峰值、音频事件混音、WAV 编码 |
 | `src/editor/*` | 编辑器状态、撤销栈、工具、各面板 UI；骨骼/网格/权重/关键帧都通过 ImDrawList 绘制 |
+| `src/editor/splash.cpp` | 启动页、快捷键窗口、用户设置（最近文件）与上次会话文件 |
 | `src/platform/*` | 纹理加载、文件对话框、音频播放与解码（miniaudio） |
 
 `core/` 不依赖 ImGui/OpenGL，以后可以单独抽出来做游戏运行时。
