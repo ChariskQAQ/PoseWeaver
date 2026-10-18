@@ -24,7 +24,8 @@
 | `src/core/constraints.h/.cpp` | IK / 变换 / 路径 / 物理约束 |
 | `src/core/serialize.h/.cpp` | JSON / 二进制读写（工程文件 = 导出格式） |
 | `src/core/merge.h/.cpp` | 合并导入另一个工程 |
-| `src/core/atlas.h/.cpp` | 纹理打包（MaxRects） |
+| `src/core/anim_state.h/.cpp` | 动画混合：多轨道、交叉淡化、队列、事件（AnimationState） |
+| `src/core/atlas.h/.cpp` | 纹理打包（MaxRects，缩放 / 自动缩放） |
 | `src/core/raster.h/.cpp` | CPU 光栅化（导出图片/视频）与 GIF 编码 |
 | `src/core/psd.h/.cpp` | PSD 图层读取 |
 | `src/core/audio_mix.h/.cpp` | 波形峰值、音频事件混音、WAV 编码 |

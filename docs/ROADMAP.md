@@ -29,9 +29,9 @@
 | 路径约束 | ✅ | 路径附件（贝塞尔，开/闭合，网格工具编辑），位置/间距/旋转模式，可打关键帧 | 路径附件的权重绑定编辑体验、恒速开关 | S | 3 |
 | 物理约束 | ✅ | 弹簧-阻尼模拟（惯性、强度、阻尼、质量、上限、风、重力），实时预览，可烘焙为关键帧 | — | — | — |
 | 皮肤 | ✅ | 皮肤占位 + 皮肤条目、多皮肤组合（后激活优先）、皮肤专用骨骼/约束、移入皮肤/复制/换图工作流 | 不同皮肤拓扑不同时的独立变形关键帧 | S | 4 |
-| Texture Packer | ✅ | MaxRects（最短边优先）、裁透明边、间距、旋转、2 的幂、多页，输出 .atlas + 页 PNG | — | — | — |
-| Export Images | ✅ | CPU 光栅化（双线性、混合、剪裁、超采样），PNG 序列 / 精灵表 / GIF | — | — | — |
-| Export Video | ✅ | 帧通过管道交给本机 ffmpeg：MP4 (H.264) / WebM (VP9 带透明) | — | — | — |
+| Texture Packer | ✅ | MaxRects（最短边优先）、裁透明边、间距、旋转、2 的幂、多页、缩放与自动缩放（缩小到一页放得下），输出 .atlas + 页 PNG | — | — | — |
+| Export Images | ✅ | CPU 光栅化（双线性、混合、剪裁、超采样），PNG / JPG 序列、精灵表、GIF | — | — | — |
+| Export Video | ✅ | 帧通过管道交给本机 ffmpeg：MP4 (H.264) / WebM (VP9 带透明) / AVI (MJPEG) / QuickTime MOV (ProRes 4444 带透明) | — | — | — |
 | Import Project | ✅ | 合并另一个工程：骨骼/插槽/约束追加并重命名，图片按路径共用，事件/皮肤/动画按名字合并 | — | — | — |
 | 音频 | ✅ | 事件音频（音量/平衡/试听），播放同步（中途开始、变速、暂停停止），Dopesheet 波形行，视频导出混入音轨 | 倒放时的音频 | S | 6 |
 
@@ -69,12 +69,18 @@
 ### 阶段 5：导入导出 ✅
 Texture Packer、Export Images（PNG 序列/精灵表/GIF）、Export Video（ffmpeg）、二进制导出、
 Import Data / Import Project（合并）、PSD 导入。渲染用 core/raster 的软件光栅化，结果确定且可测试。
-命令行：`RigEditor --run <json|bin|atlas|png|sheet|gif|mp4|webm|merge|psd> <路径>`。
+命令行：`RigEditor --run <json|bin|atlas|png|jpg|sheet|gif|mp4|webm|avi|mov|merge|psd> <路径>`。
 
 ### 阶段 6：音频 ✅
 miniaudio 播放与解码（WAV / MP3 / FLAC）；播放时按事件触发声音，从中途开始播放会接上已在进行的声音，
 速度改变音调，暂停即停止；Dopesheet 为每个有音频的事件画波形；导出视频时把音频事件混成一条音轨。
 波形峰值、混音和 WAV 编码在 core/audio_mix（有单元测试）。
+
+### 补充：动画混合 ✅
+core/anim_state 是运行时式的 AnimationState：多轨道按序叠加（高轨道覆盖其关键帧的通道，可设轨道权重），
+同轨道切换动画时交叉淡化（旋转走短路径，附件 / 绘制顺序 / IK 弯曲方向在一半处切换，变形与约束值插值），
+动画队列（延迟默认相对上一动画结束减去混合时长）、空动画淡出到下层、循环中的事件收集。
+编辑器的“混合预览”视图（Dopesheet 旁）驱动视口；任何编辑会自动退出预览。
 
 ## 风险与说明
 

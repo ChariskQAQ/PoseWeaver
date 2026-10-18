@@ -52,6 +52,10 @@ void Editor::frame(float dt) {
             }
         }
     }
+    // Mix preview: the AnimationState advances on its own clock; dopesheet playback takes the viewport back.
+    if (playing_ || mode_ != Mode::Animate) mixActive_ = false;
+    if (mixActive_ && mixPlaying_)
+        for (const rig::FiredEvent& e : mixState_.update(sk_, dt * speed_)) fireEvent(e.key, 0);
     // Audio follows playback: start sounds already in progress, stop everything on pause.
     if (playing_ && !wasPlaying_ && playDir_ > 0) startAudioAt(time_);
     if (!playing_ && wasPlaying_) audio_->stopAll();
@@ -85,6 +89,7 @@ void Editor::frame(float dt) {
     if (mode_ == Mode::Animate) {
         drawDopesheet();
         drawGraph();
+        drawMixPreview();
     }
     drawViewport();
     drawCloseDialog();
@@ -106,6 +111,7 @@ void Editor::setupDockLayout(unsigned int dockspace) {
     ImGui::DockBuilderDockWindow("###Weights", rightBottom);
     ImGui::DockBuilderDockWindow("###Dopesheet", bottom);
     ImGui::DockBuilderDockWindow("###Graph", bottom);
+    ImGui::DockBuilderDockWindow("###Preview", bottom);
     // The viewport is the workspace, not a tab: hide its tab bar like Spine does.
     if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(center)) n->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar;
     ImGui::DockBuilderFinish(dockspace);
@@ -118,6 +124,7 @@ void Editor::checkpoint() {
     if (undo_.size() > kMaxUndo) undo_.erase(undo_.begin());
     redo_.clear();
     dirty_ = true;
+    mixActive_ = false;  // edits key the current animation: show it again instead of the mix
 }
 
 void Editor::restore(const std::string& snapshot) {
@@ -274,6 +281,12 @@ void Editor::updatePose() {
     }
     resetToSetup(sk_, pose_);
     pose_.skins = activeSkins_;
+    if (mixActive_) {
+        mixState_.apply(sk_, pose_);
+        updateWorld(sk_, pose_);
+        if (physicsOn_) applyPhysics(sk_, pose_, physics_, physicsDt_);
+        return;
+    }
     if (Animation* an = currentAnimation()) applyAnimation(sk_, *an, time_, pose_);
     for (auto& [b, p] : pending_) {
         if (b >= (int)pose_.local.size()) continue;
@@ -506,17 +519,19 @@ void Editor::keyEvent(int event) {
 void Editor::triggerEvents(float from, float to) {
     Animation* an = currentAnimation();
     if (!an) return;
-    for (const EventKey* k : eventsInRange(*an, from, to)) {
-        if (k->event < 0 || k->event >= (int)sk_.events.size()) continue;
-        const EventDef& def = sk_.events[k->event];
-        std::string text = def.name;
-        if (!k->stringValue.empty()) text += " \"" + k->stringValue + "\"";
-        if (!def.audioPath.empty()) {
-            text += "  ♪";
-            if (audioOn_) audio_->play(def.audioPath, std::max(0.0f, to - k->time), def.volume, def.balance, speed_);
-        }
-        firedEvents_.push_back({text, 1.2f});
+    for (const EventKey* k : eventsInRange(*an, from, to)) fireEvent(*k, to - k->time);
+}
+
+void Editor::fireEvent(const EventKey& k, float late) {
+    if (k.event < 0 || k.event >= (int)sk_.events.size()) return;
+    const EventDef& def = sk_.events[k.event];
+    std::string text = def.name;
+    if (!k.stringValue.empty()) text += " \"" + k.stringValue + "\"";
+    if (!def.audioPath.empty()) {
+        text += "  ♪";
+        if (audioOn_) audio_->play(def.audioPath, std::max(0.0f, late), def.volume, def.balance, speed_);
     }
+    firedEvents_.push_back({text, 1.2f});
 }
 
 void Editor::startAudioAt(float t) {
@@ -1633,6 +1648,35 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
         mode_ = Mode::Animate;
         time_ = time;
         selectAttachment(0, 0);
+        frameAllIn_ = 5;
+        return;
+    }
+    if (scenario == "mix") {
+        // A second animation crossfading in on track 0, a colour layer at half weight on track 1.
+        Animation raise;
+        raise.name = "raise";
+        setRotateKey(raise, up, 0.0f, -50.0f);
+        setRotateKey(raise, low, 0.0f, 60.0f);
+        Animation tint;
+        tint.name = "tint";
+        setColorKey(tint, 0, 0.0f, Color(0.5f, 0.8f, 1, 1));
+        sk_.animations.push_back(raise);
+        sk_.animations.push_back(tint);
+        mode_ = Mode::Animate;
+        mixState_.setMix(0, 1, 0.4f);
+        mixState_.setMix(-1, 2, 0.0f);  // the colour layer appears at once
+        mixUi_[0] = {1, true, 1.0f};
+        mixUi_[1] = {2, true, 0.5f};
+        mixState_.setAnimation(0, 0, true);
+        mixState_.update(sk_, std::max(0.0f, time));
+        mixState_.setAnimation(0, 1, true);
+        mixState_.update(sk_, 0.2f);  // halfway through the 0.4 s crossfade
+        mixState_.setTrackAlpha(1, 0.5f);
+        mixState_.setAnimation(1, 2, true);
+        mixState_.update(sk_, 0.0f);
+        mixActive_ = true;
+        mixPlaying_ = false;
+        focusPreview_ = 3;
         frameAllIn_ = 5;
         return;
     }

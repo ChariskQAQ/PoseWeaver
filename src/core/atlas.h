@@ -18,6 +18,9 @@ struct AtlasSettings {
     bool allowRotate = false; // regions may be stored rotated 90 degrees clockwise
     bool powerOfTwo = false;  // page sizes rounded up to powers of two
     unsigned char alphaThreshold = 0;
+    float scale = 1.0f;       // images are resized by this factor before packing
+    bool autoScale = false;   // shrink further (steps of 10%) until everything fits on one page
+    float minScale = 0.1f;    // lower bound for autoScale
 };
 
 struct AtlasRegion {
@@ -36,8 +39,12 @@ struct AtlasPage {
 
 struct Atlas {
     std::vector<AtlasPage> pages;
-    std::vector<AtlasRegion> regions;  // same order as the inputs
+    std::vector<AtlasRegion> regions;  // same order as the inputs; sizes are in scaled pixels
+    float scale = 1.0f;                // scale the images were packed at
 };
+
+// Resizes an RGBA image with area averaging (premultiplied, so transparent pixels do not bleed colour).
+std::vector<unsigned char> resizeRgba(const unsigned char* rgba, int w, int h, int newW, int newH);
 
 bool packAtlas(const std::vector<AtlasInput>& inputs, const AtlasSettings& settings, Atlas& out, std::string* error);
 // Text description (one block per page, one entry per region) referring to `pageFiles`.

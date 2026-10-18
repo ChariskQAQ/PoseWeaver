@@ -1,4 +1,5 @@
 #pragma once
+#include "core/anim_state.h"
 #include "core/constraints.h"
 #include "core/pose.h"
 #include "platform/audio.h"
@@ -212,8 +213,10 @@ private:
         bool dataBinary = false, dataPretty = true;
         int dataDecimals = -1;
         int atlasMaxSize = 2048, atlasPadding = 2;
-        bool atlasTrim = true, atlasRotate = false, atlasPow2 = false;
-        int imageType = 0;  // 0 png sequence, 1 sprite sheet, 2 gif, 3 mp4, 4 webm
+        bool atlasTrim = true, atlasRotate = false, atlasPow2 = false, atlasAutoScale = false;
+        float atlasScale = 1.0f;
+        int imageType = 0;  // 0 png sequence, 1 sprite sheet, 2 gif, 3 mp4, 4 webm, 5 jpg sequence, 6 avi, 7 mov
+        int jpgQuality = 90;
         int imageAnim = -1;
         float imageScale = 1.0f, imageFps = 30;
         int imageSupersample = 2, imagePadding = 8;
@@ -250,6 +253,19 @@ private:
     std::vector<FiredEvent> firedEvents_;
     int focusWeights_ = 0;
     int focusGraph_ = 0;
+    int focusPreview_ = 0;
+    // Mix preview (Animate mode): an AnimationState with up to kMixTracks tracks drives the viewport.
+    static constexpr int kMixTracks = 4;
+    rig::AnimationState mixState_;
+    bool mixActive_ = false, mixPlaying_ = true;
+    struct MixTrackUi {
+        int anim = -1;
+        bool loop = true;
+        float alpha = 1.0f;
+    } mixUi_[kMixTracks];
+    float mixQueueDelay_ = 0;
+    int mixPairFrom_ = -1, mixPairTo_ = -1;
+    float mixPairDuration_ = 0.3f;
     // Onion skin (Animate mode).
     bool ghostOn_ = false;
     int ghostBefore_ = 2, ghostAfter_ = 2, ghostStep_ = 3;  // frames
@@ -269,6 +285,7 @@ private:
     void drawWeightsView();
     void drawDopesheet();
     void drawGraph();
+    void drawMixPreview();  // panel_mix.cpp
     void drawStatusBar();
     void drawCloseDialog();
     void setupDockLayout(unsigned int dockspace);
@@ -372,6 +389,7 @@ private:
     void moveDrawOrder(int slot, int delta);
     void keyEvent(int event);  // event key at the current time
     void triggerEvents(float from, float to);  // playback: show fired events in the viewport
+    void fireEvent(const rig::EventKey& k, float late);  // shows the event, plays its sound `late` seconds in
     void keyPending();  // key every pending change ("Key edited")
     KeyState boneKeyState(int bone, rig::Channel ch);
     KeyState slotKeyState(int slot);

@@ -70,6 +70,7 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 add_library(rigcore STATIC
   src/core/model.cpp
   src/core/pose.cpp
+  src/core/anim_state.cpp
   src/core/mesh_tools.cpp
   src/core/mesh_edit.cpp
   src/core/clipping.cpp
@@ -96,6 +97,7 @@ add_executable(RigEditor
   src/editor/panel_properties.cpp
   src/editor/panel_dopesheet.cpp
   src/editor/panel_graph.cpp
+  src/editor/panel_mix.cpp
   src/editor/panel_io.cpp)
 target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR} ${MINIAUDIO_DIR})
 target_link_libraries(RigEditor PRIVATE rigcore imgui)

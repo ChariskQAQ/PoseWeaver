@@ -1,6 +1,7 @@
 #include "core/atlas.h"
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 
 namespace rig {
@@ -74,7 +75,39 @@ int nextPow2(int v) {
 }
 } // namespace
 
-bool packAtlas(const std::vector<AtlasInput>& inputs, const AtlasSettings& st, Atlas& out, std::string* error) {
+std::vector<unsigned char> resizeRgba(const unsigned char* rgba, int w, int h, int newW, int newH) {
+    std::vector<unsigned char> out(size_t(std::max(0, newW)) * std::max(0, newH) * 4, 0);
+    if (!rgba || w <= 0 || h <= 0 || newW <= 0 || newH <= 0) return out;
+    const double sx = double(w) / newW, sy = double(h) / newH;
+    for (int y = 0; y < newH; ++y) {
+        const double y0 = y * sy, y1 = (y + 1) * sy;
+        for (int x = 0; x < newW; ++x) {
+            const double x0 = x * sx, x1 = (x + 1) * sx;
+            double acc[4] = {0, 0, 0, 0}, area = 0;
+            for (int py = (int)y0; py < std::min(h, (int)std::ceil(y1)); ++py) {
+                double cy = std::min(y1, py + 1.0) - std::max(y0, (double)py);
+                if (cy <= 0) continue;
+                for (int px = (int)x0; px < std::min(w, (int)std::ceil(x1)); ++px) {
+                    double cx = std::min(x1, px + 1.0) - std::max(x0, (double)px);
+                    if (cx <= 0) continue;
+                    const unsigned char* p = rgba + (size_t(py) * w + px) * 4;
+                    double wgt = cx * cy, a = p[3] / 255.0;
+                    for (int c = 0; c < 3; ++c) acc[c] += p[c] * a * wgt;
+                    acc[3] += a * wgt;
+                    area += wgt;
+                }
+            }
+            unsigned char* d = out.data() + (size_t(y) * newW + x) * 4;
+            if (area <= 0 || acc[3] <= 0) continue;
+            for (int c = 0; c < 3; ++c) d[c] = (unsigned char)std::clamp(std::lround(acc[c] / acc[3]), 0L, 255L);
+            d[3] = (unsigned char)std::clamp(std::lround(acc[3] / area * 255), 0L, 255L);
+        }
+    }
+    return out;
+}
+
+namespace {
+bool packUnscaled(const std::vector<AtlasInput>& inputs, const AtlasSettings& st, Atlas& out, std::string* error) {
     out = Atlas{};
     const int pad = std::max(0, st.padding);
     struct Item {
@@ -175,12 +208,49 @@ bool packAtlas(const std::vector<AtlasInput>& inputs, const AtlasSettings& st, A
     return true;
 }
 
+bool packScaled(const std::vector<AtlasInput>& inputs, const AtlasSettings& st, float scale, Atlas& out, std::string* error) {
+    if (std::abs(scale - 1.0f) < 1e-6f) return packUnscaled(inputs, st, out, error);
+    std::vector<std::vector<unsigned char>> storage(inputs.size());
+    std::vector<AtlasInput> scaled = inputs;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        AtlasInput& in = scaled[i];
+        in.width = std::max(1, (int)std::lround(inputs[i].width * scale));
+        in.height = std::max(1, (int)std::lround(inputs[i].height * scale));
+        if (inputs[i].rgba) {
+            storage[i] = resizeRgba(inputs[i].rgba, inputs[i].width, inputs[i].height, in.width, in.height);
+            in.rgba = storage[i].data();
+        }
+    }
+    if (!packUnscaled(scaled, st, out, error)) return false;
+    out.scale = scale;
+    return true;
+}
+} // namespace
+
+bool packAtlas(const std::vector<AtlasInput>& inputs, const AtlasSettings& st, Atlas& out, std::string* error) {
+    const float scale = std::max(0.01f, st.scale);
+    if (st.autoScale) {
+        const float minScale = std::clamp(st.minScale, 0.01f, scale);
+        for (float s = scale; s >= minScale * 0.999f; s *= 0.9f) {
+            Atlas a;
+            if (packScaled(inputs, st, s, a, nullptr) && a.pages.size() <= 1) {
+                out = std::move(a);
+                return true;
+            }
+        }
+        // Even the smallest scale needs several pages: pack at the smallest scale instead.
+        return packScaled(inputs, st, minScale, out, error);
+    }
+    return packScaled(inputs, st, scale, out, error);
+}
+
 std::string atlasText(const Atlas& atlas, const std::vector<std::string>& pageFiles) {
     std::ostringstream o;
     for (size_t p = 0; p < atlas.pages.size(); ++p) {
         o << (p < pageFiles.size() ? pageFiles[p] : "page" + std::to_string(p) + ".png") << "\n";
         o << "size: " << atlas.pages[p].width << "," << atlas.pages[p].height << "\n";
         o << "format: RGBA8888\nfilter: Linear,Linear\nrepeat: none\n";
+        if (atlas.scale != 1.0f) o << "scale: " << atlas.scale << "\n";
         for (const AtlasRegion& r : atlas.regions) {
             if (r.page != (int)p) continue;
             o << r.name << "\n";

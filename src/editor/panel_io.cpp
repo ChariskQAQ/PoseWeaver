@@ -29,6 +29,11 @@ bool writePng(const std::string& path, int w, int h, const std::vector<unsigned 
     return stbi_write_png(path.c_str(), w, h, 4, rgba.data(), w * 4) != 0;
 }
 
+// Image types of the export dialog (IoState::imageType).
+bool isSequence(int t) { return t == 0 || t == 5; }
+bool isVideo(int t) { return t == 3 || t == 4 || t == 6 || t == 7; }
+bool isOpaque(int t) { return t == 3 || t == 5 || t == 6; }  // JPG, MP4 (yuv420p) and AVI (MJPEG) have no alpha
+
 bool readBytes(const std::string& path, std::vector<uint8_t>& out) {
     std::ifstream f(fs::u8path(path), std::ios::binary);
     if (!f) return false;
@@ -208,6 +213,8 @@ bool Editor::exportAtlasPath(const std::string& path) {
     st.trim = io_.atlasTrim;
     st.allowRotate = io_.atlasRotate;
     st.powerOfTwo = io_.atlasPow2;
+    st.scale = io_.atlasScale;
+    st.autoScale = io_.atlasAutoScale;
     Atlas atlas;
     std::string err;
     if (!packAtlas(inputs, st, atlas, &err)) {
@@ -231,7 +238,8 @@ bool Editor::exportAtlasPath(const std::string& path) {
     for (auto& r : atlas.regions) used += r.width * r.height;
     for (auto& p : atlas.pages) total += p.width * p.height;
     setStatus("已打包 " + std::to_string(inputs.size()) + " 张图片到 " + std::to_string(atlas.pages.size()) + " 页，利用率 " +
-              std::to_string(total ? used * 100 / total : 0) + "%");
+              std::to_string(total ? used * 100 / total : 0) + "%" +
+              (atlas.scale != 1.0f ? "，缩放 " + std::to_string((int)std::lround(atlas.scale * 100)) + "%" : std::string()));
     return true;
 }
 
@@ -242,7 +250,7 @@ bool Editor::exportImagesPath(const std::string& path) {
     std::vector<RasterTexture> tex;
     for (auto& t : textures_) tex.push_back({t.width, t.height, t.rgba.empty() ? nullptr : t.rgba.data()});
     const float fps = std::max(1.0f, io_.imageFps);
-    const int frames = an ? std::max(1, (int)std::round(an->duration * fps)) + (io_.imageType == 0 ? 1 : 0) : 1;
+    const int frames = an ? std::max(1, (int)std::round(an->duration * fps)) + (isSequence(io_.imageType) ? 1 : 0) : 1;
     // Poses for every frame (physics simulated in order), and the union of their bounds.
     std::vector<Pose> poses;
     PhysicsState phys;
@@ -264,13 +272,13 @@ bool Editor::exportImagesPath(const std::string& path) {
     const float scale = std::max(0.05f, io_.imageScale);
     const int pad = std::max(0, io_.imagePadding);
     int w = (int)std::ceil((hi.x - lo.x) * scale) + 2 * pad, h = (int)std::ceil((hi.y - lo.y) * scale) + 2 * pad;
-    if (io_.imageType >= 3) {  // video codecs want even sizes
+    if (isVideo(io_.imageType)) {  // video codecs want even sizes
         w += w & 1;
         h += h & 1;
     }
     const int ss = std::clamp(io_.imageSupersample, 1, 4);
     Affine toPx{scale * ss, 0, 0, -scale * ss, (pad - lo.x * scale) * ss, (pad + hi.y * scale) * ss};
-    bool opaque = io_.imageType == 3;  // MP4 has no alpha
+    bool opaque = isOpaque(io_.imageType);
     auto renderFrame = [&](const Pose& p) {
         std::vector<unsigned char> img(size_t(w * ss) * (h * ss) * 4, 0);
         if (io_.imageBackground || opaque)
@@ -295,6 +303,18 @@ bool Editor::exportImagesPath(const std::string& path) {
             written += writePng((out.parent_path() / fs::u8path(stem + num)).u8string(), w, h, renderFrame(poses[f]));
         }
         setStatus("已导出 " + std::to_string(written) + " 张 PNG（" + std::to_string(w) + "x" + std::to_string(h) + "）");
+        return written == frames;
+    }
+    case 5: {  // JPG sequence
+        int written = 0;
+        for (int f = 0; f < frames; ++f) {
+            char num[16];
+            std::snprintf(num, sizeof(num), "_%04d.jpg", f);
+            std::vector<unsigned char> img = renderFrame(poses[f]);
+            written += stbi_write_jpg((out.parent_path() / fs::u8path(stem + num)).u8string().c_str(), w, h, 4, img.data(),
+                                      std::clamp(io_.jpgQuality, 1, 100)) != 0;
+        }
+        setStatus("已导出 " + std::to_string(written) + " 张 JPG（" + std::to_string(w) + "x" + std::to_string(h) + "）");
         return written == frames;
     }
     case 1: {  // sprite sheet
@@ -328,7 +348,11 @@ bool Editor::exportImagesPath(const std::string& path) {
         char sizeArg[32], fpsArg[32];
         std::snprintf(sizeArg, sizeof(sizeArg), "%dx%d", w, h);
         std::snprintf(fpsArg, sizeof(fpsArg), "%g", fps);
-        std::string codec = io_.imageType == 3 ? "-c:v libx264 -pix_fmt yuv420p -crf 18" : "-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 30";
+        const char* codecs[] = {"-c:v libx264 -pix_fmt yuv420p -crf 18", "-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 30",
+                                "-c:v mjpeg -pix_fmt yuvj444p -q:v 2", "-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le"};
+        const char* audioCodecs[] = {" -c:a aac -b:a 192k", " -c:a libopus -b:a 128k", " -c:a pcm_s16le", " -c:a pcm_s16le"};
+        const int vi = io_.imageType == 3 ? 0 : io_.imageType == 4 ? 1 : io_.imageType == 6 ? 2 : 3;
+        std::string codec = codecs[vi];
         // Audio events mixed into one track (written next to the video, removed afterwards).
         std::string audioInput, audioCodec;
         fs::path wav = out.parent_path() / fs::u8path(stem + "_audio.wav");
@@ -345,7 +369,7 @@ bool Editor::exportImagesPath(const std::string& path) {
                 wf.write((const char*)bytes.data(), (std::streamsize)bytes.size());
                 if (wf) {
                     audioInput = " -i \"" + wav.u8string() + "\" -map 0:v -map 1:a";
-                    audioCodec = io_.imageType == 3 ? " -c:a aac -b:a 192k" : " -c:a libopus -b:a 128k";
+                    audioCodec = audioCodecs[vi];
                 }
             }
         }
@@ -424,6 +448,9 @@ void Editor::drawIoDialogs() {
         ImGui::Checkbox("裁掉透明边", &io_.atlasTrim);
         ImGui::Checkbox("允许旋转", &io_.atlasRotate);
         ImGui::Checkbox("页尺寸为 2 的幂", &io_.atlasPow2);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+        ImGui::DragFloat("缩放", &io_.atlasScale, 0.01f, 0.05f, 4.0f, "%.2f");
+        ImGui::Checkbox("自动缩放（缩小到一页放得下）", &io_.atlasAutoScale);
         ImGui::TextDisabled("输出 .atlas 描述文件和同名的页 PNG。");
         if (buttons("打包...")) {
             std::string path = saveFileDialog("图集 (*.atlas)", "*.atlas", "atlas");
@@ -433,9 +460,11 @@ void Editor::drawIoDialogs() {
         ImGui::EndPopup();
     }
     if (begin("导出图片 / 动画")) {
-        const char* types[] = {"PNG 序列", "精灵表 PNG", "GIF", "视频 MP4 (H.264)", "视频 WebM (VP9，透明)"};
+        const char* types[] = {"PNG 序列",          "精灵表 PNG",         "GIF",
+                               "视频 MP4 (H.264)",  "视频 WebM (VP9，透明)", "JPG 序列",
+                               "视频 AVI (MJPEG)",  "视频 QuickTime MOV (ProRes 4444，透明)"};
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-        ImGui::Combo("类型", &io_.imageType, types, 5);
+        ImGui::Combo("类型", &io_.imageType, types, IM_ARRAYSIZE(types));
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
         const char* animName = io_.imageAnim >= 0 && io_.imageAnim < (int)sk_.animations.size() ? sk_.animations[io_.imageAnim].name.c_str() : "(Setup 姿态)";
         if (ImGui::BeginCombo("动画", animName)) {
@@ -458,16 +487,22 @@ void Editor::drawIoDialogs() {
         ImGui::Checkbox("背景色", &io_.imageBackground);
         ImGui::SameLine();
         ImGui::ColorEdit3("##bg", io_.imageBgColor, ImGuiColorEditFlags_NoInputs);
-        if (io_.imageType >= 3) {
+        if (io_.imageType == 5) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SliderInt("JPG 质量", &io_.jpgQuality, 1, 100);
+        }
+        if (isOpaque(io_.imageType)) ImGui::TextDisabled("此格式不支持透明：空白处用背景色填充。");
+        if (isVideo(io_.imageType)) {
             ImGui::Checkbox("包含音频事件的声音", &io_.videoAudio);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
             ImGui::InputText("ffmpeg", &io_.ffmpegPath);
             ImGui::TextDisabled("视频由本机安装的 ffmpeg 编码（不随编辑器分发）。");
         }
         if (buttons("导出...")) {
-            const char* names[] = {"PNG (*.png)", "PNG (*.png)", "GIF (*.gif)", "MP4 (*.mp4)", "WebM (*.webm)"};
-            const char* specs[] = {"*.png", "*.png", "*.gif", "*.mp4", "*.webm"};
-            const char* exts[] = {"png", "png", "gif", "mp4", "webm"};
+            const char* names[] = {"PNG (*.png)",   "PNG (*.png)", "GIF (*.gif)", "MP4 (*.mp4)",
+                                   "WebM (*.webm)", "JPG (*.jpg)", "AVI (*.avi)", "QuickTime (*.mov)"};
+            const char* specs[] = {"*.png", "*.png", "*.gif", "*.mp4", "*.webm", "*.jpg", "*.avi", "*.mov"};
+            const char* exts[] = {"png", "png", "gif", "mp4", "webm", "jpg", "avi", "mov"};
             std::string path = saveFileDialog(names[io_.imageType], specs[io_.imageType], exts[io_.imageType]);
             if (!path.empty()) exportImagesPath(path);
             ImGui::CloseCurrentPopup();
@@ -494,8 +529,8 @@ bool Editor::runExport(const std::string& type, const std::string& path) {
     if (type == "atlas") return exportAtlasPath(path);
     if (type == "merge") return importMergePath(path);
     if (type == "psd") return importPsdPath(path, true);
-    const char* types[] = {"png", "sheet", "gif", "mp4", "webm"};
-    for (int i = 0; i < 5; ++i)
+    const char* types[] = {"png", "sheet", "gif", "mp4", "webm", "jpg", "avi", "mov"};
+    for (int i = 0; i < 8; ++i)
         if (type == types[i]) {
             io_.imageType = i;
             io_.imageAnim = anim_;

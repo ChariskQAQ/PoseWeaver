@@ -53,7 +53,9 @@ void Editor::drawModeLabel() {
     ImGui::PopFont();
     if (hovered) ImGui::SetTooltip("点击切换 Setup / Animate 模式 (Tab)");
     if (clicked) setMode(mode_ == Mode::Setup ? Mode::Animate : Mode::Setup);
-    if (mode_ == Mode::Animate) {
+    if (mode_ == Mode::Animate && mixActive_) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 0.9f), "混合预览中（%s）", mixPlaying_ ? "播放" : "暂停");
+    } else if (mode_ == Mode::Animate) {
         Animation* an = currentAnimation();
         ImGui::TextColored(ImVec4(1, 1, 1, 0.7f), "%s   第 %d 帧", an ? an->name.c_str() : "(无动画)",
                            (int)std::round(time_ * fps_));

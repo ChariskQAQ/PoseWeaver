@@ -1,4 +1,5 @@
 // Minimal self-checking tests for rigcore (no framework dependency).
+#include "core/anim_state.h"
 #include "core/atlas.h"
 #include "core/audio_mix.h"
 #include "core/clipping.h"
@@ -893,6 +894,25 @@ static void testAtlas() {
     CHECK(packAtlas({{"c", 10, 50, c.data()}}, rot, atlas, &err));
     CHECK(atlas.regions[0].rotated && atlas.regions[0].width == 50);
     CHECK(atlasText(atlas, {"page.png"}).find("rotate: true") != std::string::npos);
+    // Fixed scale halves the regions (area-averaged, premultiplied: no dark fringe at the trimmed edge).
+    AtlasSettings half;
+    half.maxWidth = half.maxHeight = 256;
+    half.scale = 0.5f;
+    CHECK(packAtlas(in, half, atlas, &err));
+    CHECK(atlas.scale == 0.5f && atlas.regions[1].width == 32 && atlas.regions[0].originalWidth == 20);
+    CHECK(atlasText(atlas, {"page.png"}).find("scale: 0.5") != std::string::npos);
+    std::vector<unsigned char> edge = {255, 0, 0, 255, 0, 0, 0, 0};  // red pixel next to a transparent black one
+    std::vector<unsigned char> one = resizeRgba(edge.data(), 2, 1, 1, 1);
+    CHECK(one[0] == 255 && one[1] == 0 && std::abs(one[3] - 128) <= 1);
+    // Auto-scale shrinks until everything fits on one 72x72 page instead of spilling.
+    st.maxWidth = st.maxHeight = 72;
+    st.autoScale = true;
+    CHECK(packAtlas(in, st, atlas, &err));
+    CHECK(atlas.pages.size() == 1 && atlas.scale < 1.0f && atlas.scale > 0.5f);
+    // ...and also rescues images larger than the page.
+    st.maxWidth = st.maxHeight = 32;
+    CHECK(packAtlas(in, st, atlas, &err));
+    CHECK(atlas.pages.size() == 1 && atlas.regions[1].width <= 30);
 }
 
 static void testRaster() {
@@ -1198,6 +1218,71 @@ static void testJsonRoundTrip() {
                     loaded, &err));
 }
 
+static void testAnimationState() {
+    Skeleton sk = makeArm();
+    EventDef hit;
+    hit.name = "hit";
+    sk.events = {hit};
+    Animation a, b, c;
+    a.name = "a";
+    setRotateKey(a, 1, 0.0f, -90.0f);  // upper bone to 0 degrees
+    setScaleKey(a, 2, 0.0f, {2, 2});   // only `a` keys the lower bone's scale
+    setEventKey(a, 0.5f, 0, sk.events[0]);
+    b.name = "b";
+    setRotateKey(b, 1, 0.0f, 30.0f);  // upper bone to 120 degrees
+    c.name = "c";
+    setRotateKey(c, 2, 0.0f, 45.0f);
+    sk.animations = {a, b, c};
+    auto pose = [&](const AnimationState& st) {
+        Pose p;
+        resetToSetup(sk, p);
+        st.apply(sk, p);
+        updateWorld(sk, p);
+        return p;
+    };
+    AnimationState st;
+    st.setMix(0, 1, 0.4f);
+    st.setAnimation(0, 0, true);  // track 0 starts without a fade
+    Pose p = pose(st);
+    CHECK(near(p.local[1].rotation, 0.0f) && near(p.local[2].scaleX, 2.0f));
+    // Crossfade a -> b: halfway, rotation in between and a's scale half faded back to setup.
+    st.setAnimation(0, 1, true);
+    st.update(sk, 0.2f);
+    p = pose(st);
+    CHECK(near(p.local[1].rotation, 60.0f) && near(p.local[2].scaleX, 1.5f) && st.mixingCount(0) == 2);
+    st.update(sk, 0.3f);
+    p = pose(st);
+    CHECK(near(p.local[1].rotation, 120.0f) && near(p.local[2].scaleX, 1.0f) && st.mixingCount(0) == 1);
+    // Track 1 layers on top, fading in; its alpha scales it; the empty animation fades it out.
+    st.setAnimation(1, 2, true);
+    st.update(sk, 0.1f);
+    p = pose(st);
+    CHECK(near(p.local[2].rotation, 22.5f) && near(p.local[1].rotation, 120.0f));
+    st.update(sk, 0.2f);
+    st.setTrackAlpha(1, 0.5f);
+    CHECK(near(pose(st).local[2].rotation, 22.5f));
+    st.setTrackAlpha(1, 1.0f);
+    st.setEmptyAnimation(1, 0.2f);
+    st.update(sk, 0.2f);
+    CHECK(near(pose(st).local[2].rotation, 0.0f) && !st.current(1));
+    // Events across loops, and a queued animation starting at the end of the current cycle minus its mix.
+    AnimationState ev;
+    ev.setMix(0, 1, 0.4f);
+    ev.setAnimation(0, 0, true);
+    CHECK(ev.update(sk, 0.6f).size() == 1);
+    CHECK(ev.update(sk, 1.0f).size() == 1);  // 0.6 -> 1.6 passes 1.5
+    ev.addAnimation(sk, 0, 1, false);       // delay 2.0 - 0.4
+    CHECK(ev.queuedCount(0) == 1);
+    ev.update(sk, 0.05f);
+    CHECK(ev.queuedCount(0) == 0 && ev.mixingCount(0) == 2 && ev.current(0)->animation == 1);
+    CHECK(near(ev.current(0)->trackTime, 0.05f));
+    // applyAnimationMix on its own.
+    Pose q;
+    resetToSetup(sk, q);
+    applyAnimationMix(sk, sk.animations[1], 0, 0.25f, q);
+    CHECK(near(q.local[1].rotation, 97.5f));
+}
+
 int main() {
     testWorldTransforms();
     testAnimationSampling();
@@ -1232,6 +1317,7 @@ int main() {
     testAudioMix();
     testChainIk();
     testJsonRoundTrip();
+    testAnimationState();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;
