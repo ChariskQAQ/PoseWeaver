@@ -1137,6 +1137,33 @@ static void testAudioMix() {
     CHECK(keys.size() == 1 && keys[0].event == 1 && near(keys[0].time, 0.3f));
 }
 
+static void testChainIk() {
+    // Three 100-long bones along +x; the tip must reach (120, 150).
+    Skeleton sk;
+    int root = sk.addBone("root", -1, {}, 0);
+    int a = sk.addBone("a", root, {}, 100);
+    Transform t;
+    t.x = 100;
+    int b = sk.addBone("b", a, t, 100);
+    int c = sk.addBone("c", b, t, 100);
+    Pose pose = makeSetupPose(sk);
+    std::vector<float> rot = solveChainIk(sk, pose, {a, b, c}, {120, 150}, 30);
+    CHECK(rot.size() == 3);
+    for (int i = 0; i < 3; ++i) pose.local[std::vector<int>{a, b, c}[i]].rotation = rot[i];
+    updateWorld(sk, pose);
+    CHECK(near(boneTip(sk.bones[c], pose.world[c]), {120, 150}, 0.5f));
+    // Unreachable: the chain points at the target.
+    pose = makeSetupPose(sk);
+    rot = solveChainIk(sk, pose, {a, b, c}, {0, 1000}, 30);
+    for (int i = 0; i < 3; ++i) pose.local[std::vector<int>{a, b, c}[i]].rotation = rot[i];
+    updateWorld(sk, pose);
+    CHECK(near(pose.world[c].rotationDeg(), 90, 1.0f) && near(pose.world[a].rotationDeg(), 90, 1.0f));
+    // A single bone just points at the target.
+    pose = makeSetupPose(sk);
+    rot = solveChainIk(sk, pose, {c}, {200, 100}, 5);
+    CHECK(near(rot[0], 90, 0.5f));
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -1203,6 +1230,7 @@ int main() {
     testMerge();
     testPsd();
     testAudioMix();
+    testChainIk();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

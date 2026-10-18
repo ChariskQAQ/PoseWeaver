@@ -1,4 +1,5 @@
-// Graph view: value-over-time curves of the selected bone, with Bezier handle editing.
+// Graph view: value-over-time curves of the selected bone (or slot colour), Bezier handles,
+// zoom and pan.
 #include "editor/editor.h"
 
 #include "editor/channels.h"
@@ -21,7 +22,8 @@ struct CurveDef {
 constexpr CurveDef kCurves[] = {
     {Channel::Rotate, 0, "旋转"},  {Channel::Translate, 0, "移动 X"}, {Channel::Translate, 1, "移动 Y"},
     {Channel::Scale, 0, "缩放 X"}, {Channel::Scale, 1, "缩放 Y"},     {Channel::Shear, 0, "斜切 X"},
-    {Channel::Shear, 1, "斜切 Y"},
+    {Channel::Shear, 1, "斜切 Y"},  {Channel::Color, 0, "红"},     {Channel::Color, 1, "绿"},
+    {Channel::Color, 2, "蓝"},     {Channel::Color, 3, "透明度"},
 };
 constexpr int kCurveCount = (int)(sizeof(kCurves) / sizeof(kCurves[0]));
 
@@ -29,21 +31,29 @@ constexpr int kCurveCount = (int)(sizeof(kCurves) / sizeof(kCurves[0]));
 struct Access {
     std::vector<FloatKey>* f = nullptr;
     std::vector<Vec2Key>* v = nullptr;
+    std::vector<ColorKey>* c = nullptr;
     int comp = 0;
 
-    size_t size() const { return f ? f->size() : v ? v->size() : 0; }
-    float time(size_t i) const { return f ? (*f)[i].time : (*v)[i].time; }
-    float value(size_t i) const { return f ? (*f)[i].value : (comp ? (*v)[i].value.y : (*v)[i].value.x); }
+    size_t size() const { return f ? f->size() : v ? v->size() : c ? c->size() : 0; }
+    float time(size_t i) const { return f ? (*f)[i].time : v ? (*v)[i].time : (*c)[i].time; }
+    float value(size_t i) const {
+        if (f) return (*f)[i].value;
+        if (v) return comp ? (*v)[i].value.y : (*v)[i].value.x;
+        return (*c)[i].value[comp];
+    }
     void setValue(size_t i, float x) {
         if (f) (*f)[i].value = x;
-        else if (comp) (*v)[i].value.y = x;
-        else (*v)[i].value.x = x;
+        else if (v) (comp ? (*v)[i].value.y : (*v)[i].value.x) = x;
+        else (*c)[i].value[comp] = std::clamp(x, 0.0f, 1.0f);
     }
-    CurveShape& curve(size_t i) { return f ? (*f)[i].curve : (*v)[i].curve; }
+    CurveShape& curve(size_t i) { return f ? (*f)[i].curve : v ? (*v)[i].curve : (*c)[i].curve; }
     float sampleAt(float t) const {
         if (f) return sample(*f, t, 0.0f);
-        Vec2 s = sample(*v, t, Vec2{});
-        return comp ? s.y : s.x;
+        if (v) {
+            Vec2 s = sample(*v, t, Vec2{});
+            return comp ? s.y : s.x;
+        }
+        return sample(*c, t, Color())[comp];
     }
     int indexAt(float t) const {
         for (size_t i = 0; i < size(); ++i)
@@ -52,9 +62,21 @@ struct Access {
     }
 };
 
-Access access(BoneTimeline& tl, const CurveDef& c) {
+// The timelines the graph shows: a bone's or a slot's (colour).
+struct Source {
+    BoneTimeline* bone = nullptr;
+    SlotTimeline* slot = nullptr;
+};
+
+Access access(const Source& src, const CurveDef& c) {
     Access a;
     a.comp = c.comp;
+    if (c.channel == Channel::Color) {
+        if (src.slot) a.c = &src.slot->color;
+        return a;
+    }
+    if (!src.bone) return a;
+    BoneTimeline& tl = *src.bone;
     switch (c.channel) {
     case Channel::Rotate: a.f = &tl.rotate; break;
     case Channel::Translate: a.v = &tl.translate; break;
@@ -66,6 +88,11 @@ Access access(BoneTimeline& tl, const CurveDef& c) {
 
 ImU32 curveColor(int id) {
     const CurveDef& c = kCurves[id];
+    if (c.channel == Channel::Color) {
+        static const ImU32 rgba[4] = {IM_COL32(240, 80, 80, 255), IM_COL32(90, 220, 100, 255), IM_COL32(90, 140, 250, 255),
+                                      IM_COL32(220, 220, 220, 255)};
+        return rgba[c.comp];
+    }
     ImU32 base = channelColor(c.channel);
     if (c.comp == 1) {  // Y component: lighter shade of the channel colour
         ImVec4 v = ImGui::ColorConvertU32ToFloat4(base);
@@ -89,14 +116,26 @@ void Editor::drawGraph() {
         return;
     }
     Animation* an = currentAnimation();
+    // A selected slot / attachment shows its colour curves, otherwise the selected bone's curves.
+    bool slotMode = sel_.slot >= 0 && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
     int bone = sel_.bone >= 0 && sel_.kind != Selection::None ? sel_.bone : -1;
-    auto boneIt = an && bone >= 0 ? an->bones.find(bone) : std::map<int, BoneTimeline>::iterator{};
-    if (!an || bone < 0 || boneIt == an->bones.end()) {
-        ImGui::TextDisabled(!an ? "没有动画。" : bone < 0 ? "选择一根骨骼，查看它的关键帧曲线。" : "所选骨骼在当前动画里没有关键帧。");
+    Source tl;
+    if (an && slotMode) {
+        auto it = an->slots.find(sel_.slot);
+        if (it != an->slots.end() && !it->second.color.empty()) tl.slot = &it->second;
+    } else if (an && bone >= 0) {
+        auto it = an->bones.find(bone);
+        if (it != an->bones.end()) tl.bone = &it->second;
+    }
+    if (!tl.bone && !tl.slot) {
+        ImGui::TextDisabled(!an ? "没有动画。"
+                            : slotMode ? "所选插槽在当前动画里没有颜色关键帧。"
+                            : bone < 0 ? "选择一根骨骼（或插槽，看颜色曲线）。"
+                                       : "所选骨骼在当前动画里没有关键帧。");
         ImGui::End();
         return;
     }
-    BoneTimeline& tl = boneIt->second;
+    const int keyIndex = tl.slot ? sel_.slot : bone;  // timeline owner for moveChannelKey
     ImGuiIO& io = ImGui::GetIO();
     const float fh = ImGui::GetFrameHeight();
 
@@ -106,7 +145,7 @@ void Editor::drawGraph() {
     {
         bool hasSel = graphCurve_ >= 0;
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("%s", sk_.bones[bone].name.c_str());
+        ImGui::TextDisabled("%s", tl.slot ? sk_.slots[sel_.slot].name.c_str() : sk_.bones[bone].name.c_str());
         ImGui::SameLine(0, 12);
         ImGui::BeginDisabled(!hasSel);
         auto preset = [&](const char* label, const CurveShape& c) {
@@ -129,10 +168,16 @@ void Editor::drawGraph() {
                                 a.value(graphKey_));
             if (kCurves[graphCurve_].channel != Channel::Rotate) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("(X/Y 共用同一条曲线形状)");
+                ImGui::TextDisabled(kCurves[graphCurve_].channel == Channel::Color ? "(RGBA 共用同一条曲线形状)" : "(X/Y 共用同一条曲线形状)");
             }
         } else {
-            ImGui::TextDisabled("点击曲线上的关键帧，拖动手柄调整缓动");
+            ImGui::TextDisabled("点击关键帧，拖手柄调缓动；滚轮缩放时间，Ctrl+滚轮缩放数值，右键拖动平移");
+        }
+        ImGui::SameLine(0, 12);
+        if (ImGui::SmallButton("适配")) {
+            graphPps_ = 0;
+            graphScroll_ = 0;
+            graphAutoY_ = true;
         }
     }
 
@@ -160,7 +205,7 @@ void Editor::drawGraph() {
     ImVec2 size = ImGui::GetContentRegionAvail();
     size.x = std::max(size.x, 100.0f);
     size.y = std::max(size.y, 80.0f);
-    ImGui::InvisibleButton("##graph", size, ImGuiButtonFlags_MouseButtonLeft);
+    ImGui::InvisibleButton("##graph", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
     bool hovered = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rulerH = fh;
@@ -168,7 +213,7 @@ void Editor::drawGraph() {
     ImVec2 plotLo(origin.x + labelW, origin.y + rulerH + 6), plotHi(origin.x + size.x - 10, origin.y + size.y - 8);
     float dur = std::max(an->duration, 1.0f / fps_);
 
-    // Vertical range: fit every visible curve (sampled), its keys and the selected key's handles.
+    // Vertical range: fit every visible curve (sampled) and its keys, unless the user zoomed.
     float vmin = 1e9f, vmax = -1e9f;
     auto grow = [&](float v) {
         vmin = std::min(vmin, v);
@@ -192,11 +237,49 @@ void Editor::drawGraph() {
     float pad = (vmax - vmin) * 0.12f;
     vmin -= pad;
     vmax += pad;
+    if (graphAutoY_) {
+        graphVMin_ = vmin;
+        graphVMax_ = vmax;
+    } else {
+        vmin = graphVMin_;
+        vmax = graphVMax_;
+    }
+    const float plotW = plotHi.x - plotLo.x, plotH = plotHi.y - plotLo.y;
+    float pps = graphPps_ > 0 ? graphPps_ : plotW / dur;  // pixels per second
+    if (graphPps_ <= 0) graphScroll_ = 0;
 
-    auto tx = [&](float t) { return plotLo.x + t / dur * (plotHi.x - plotLo.x); };
-    auto vy = [&](float v) { return plotHi.y - (v - vmin) / (vmax - vmin) * (plotHi.y - plotLo.y); };
-    auto xt = [&](float x) { return (x - plotLo.x) / (plotHi.x - plotLo.x) * dur; };
-    auto yv = [&](float y) { return vmin + (plotHi.y - y) / (plotHi.y - plotLo.y) * (vmax - vmin); };
+    auto tx = [&](float t) { return plotLo.x + (t - graphScroll_) * pps; };
+    auto vy = [&](float v) { return plotHi.y - (v - vmin) / (vmax - vmin) * plotH; };
+    auto xt = [&](float x) { return graphScroll_ + (x - plotLo.x) / pps; };
+    auto yv = [&](float y) { return vmin + (plotHi.y - y) / plotH * (vmax - vmin); };
+
+    // Zoom (wheel: time, Ctrl+wheel: values) and pan (right drag) around the mouse.
+    if (hovered && io.MouseWheel != 0) {
+        if (io.KeyCtrl) {
+            float at = yv(io.MousePos.y), k = std::pow(1.2f, -io.MouseWheel);
+            graphVMin_ = at + (vmin - at) * k;
+            graphVMax_ = at + (vmax - at) * k;
+            graphAutoY_ = false;
+        } else {
+            float at = xt(io.MousePos.x);
+            float n = std::clamp(pps * std::pow(1.2f, io.MouseWheel), 10.0f, 10000.0f);
+            graphPps_ = n;
+            graphScroll_ = at - (io.MousePos.x - plotLo.x) / n;
+        }
+    }
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) graphPanning_ = true;
+    if (graphPanning_) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            if (graphPps_ <= 0) graphPps_ = pps;
+            graphScroll_ -= io.MouseDelta.x / pps;
+            float dv = io.MouseDelta.y / plotH * (vmax - vmin);
+            graphVMin_ = vmin + dv;
+            graphVMax_ = vmax + dv;
+            graphAutoY_ = false;
+        } else {
+            graphPanning_ = false;
+        }
+    }
 
     dl->AddRectFilled(origin, origin + size, IM_COL32(46, 46, 49, 255));
     dl->AddRectFilled(ImVec2(origin.x, origin.y), ImVec2(origin.x + size.x, origin.y + rulerH), IM_COL32(40, 40, 43, 255));
@@ -204,15 +287,19 @@ void Editor::drawGraph() {
 
     // Grid: frames on X, "nice" steps on Y.
     int every = 1;
-    float ppf = (plotHi.x - plotLo.x) / dur / fps_;
+    float ppf = pps / fps_;
     while (ppf * every < 34) every *= 2;
-    for (int f = 0; f <= (int)std::round(dur * fps_); f += every) {
+    dl->PushClipRect(ImVec2(plotLo.x - 4, origin.y), ImVec2(origin.x + size.x, origin.y + size.y), true);
+    int firstF = std::max(0, (int)std::floor(graphScroll_ * fps_ / every) * every);
+    for (int f = firstF; f <= (int)std::round(dur * fps_); f += every) {
         float x = tx(f / fps_);
+        if (x > plotHi.x + 4) break;
         dl->AddLine(ImVec2(x, plotLo.y), ImVec2(x, plotHi.y), IM_COL32(255, 255, 255, 14));
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%d", f);
         dl->AddText(ImVec2(x + 3, origin.y + 2), dim, buf);
     }
+    dl->PopClipRect();
     float range = vmax - vmin;
     float step = std::pow(10.0f, std::floor(std::log10(range / 4)));
     if (range / step > 10) step *= 2.5f;
@@ -289,7 +376,7 @@ void Editor::drawGraph() {
             float from = a.time(graphKey_);
             float to = std::clamp(io.KeyShift ? xt(mouse.x) : snapTime(xt(mouse.x)), 0.0f, an->duration);
             if (std::fabs(to - from) > kKeyEpsilon && a.indexAt(to) < 0) {
-                moveChannelKey(*an, bone, kCurves[graphCurve_].channel, from, to);
+                moveChannelKey(*an, keyIndex, kCurves[graphCurve_].channel, from, to);
                 graphKey_ = access(tl, kCurves[graphCurve_]).indexAt(to);
             }
             setTime(access(tl, kCurves[graphCurve_]).time(graphKey_));
@@ -322,11 +409,13 @@ void Editor::drawGraph() {
         if (a.size() == 0) continue;
         ImU32 col = curveColor(id);
         std::vector<ImVec2> pts;
-        int n = std::max(32, (int)((plotHi.x - plotLo.x) / 3));
-        for (int i = 0; i <= n; ++i) {
-            float t = dur * i / n;
+        int n = std::max(32, (int)(plotW / 3));
+        float t0 = std::max(0.0f, xt(plotLo.x)), t1 = std::min(dur, xt(plotHi.x));
+        for (int i = 0; i <= n && t1 > t0; ++i) {
+            float t = t0 + (t1 - t0) * i / n;
             pts.push_back(ImVec2(tx(t), vy(a.sampleAt(t))));
         }
+        if (pts.size() < 2) continue;
         dl->AddPolyline(pts.data(), (int)pts.size(), col, 0, id == graphCurve_ ? 2.5f : 1.6f);
         for (size_t k = 0; k < a.size(); ++k) {
             ImVec2 p(tx(a.time(k)), vy(a.value(k)));

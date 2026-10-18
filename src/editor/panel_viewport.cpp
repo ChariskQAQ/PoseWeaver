@@ -203,10 +203,35 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
             sel_.clear();
             return;
         }
+        if (ctrl) {
+            // Ctrl+click toggles bones in the multi-selection (posed together as IK chains).
+            std::vector<int> multi = sel_.bones;
+            if (multi.empty() && sel_.kind == Selection::Bone && sel_.bone >= 0) multi.push_back(sel_.bone);
+            auto it = std::find(multi.begin(), multi.end(), b);
+            if (it != multi.end()) multi.erase(it);
+            else multi.push_back(b);
+            selectBone(multi.empty() ? -1 : multi.back());
+            sel_.bones = multi;
+            return;
+        }
+        bool inMulti = std::find(sel_.bones.begin(), sel_.bones.end(), b) != sel_.bones.end();
+        std::vector<int> multi = inMulti ? sel_.bones : std::vector<int>{b};
         selectBone(b);
+        sel_.bones = multi;
         bool onOrigin = dist(mouse, toScreen(pose_.world[b].origin())) < 8.0f * uiScale_;
         beginBoneDrag(b, onOrigin ? Tool::Translate : Tool::Rotate);
-        if (!onOrigin) drag_.kind = Drag::PoseRotate;
+        if (onOrigin) return;
+        // The dragged bone and its selected ancestors (contiguous) form the IK chain.
+        std::vector<int> chain{b};
+        for (int p = sk_.bones[b].parent; p >= 0 && std::find(multi.begin(), multi.end(), p) != multi.end(); p = sk_.bones[p].parent)
+            chain.insert(chain.begin(), p);
+        if (chain.size() >= 2) {
+            drag_.kind = Drag::PoseIk;
+            drag_.chain = chain;
+            drag_.startPose = pose_;
+        } else {
+            drag_.kind = Drag::PoseRotate;
+        }
         return;
     }
     case Tool::CreateBone:
@@ -329,6 +354,16 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
         applyTool(t);
         transformBone(sel_.bone, t, drag_.tool == Tool::Rotate, drag_.tool == Tool::Translate, drag_.tool == Tool::Scale,
                       drag_.tool == Tool::Shear);
+        break;
+    }
+    case Drag::PoseIk: {
+        ensureCheckpoint();
+        std::vector<float> rot = solveChainIk(sk_, drag_.startPose, drag_.chain, world, 16);
+        for (size_t i = 0; i < drag_.chain.size(); ++i) {
+            Transform t = drag_.startPose.local[drag_.chain[i]];
+            t.rotation = rot[i];
+            setBoneLocal(drag_.chain[i], t, true, false, false, false);
+        }
         break;
     }
     case Drag::PoseRotate: {
@@ -597,7 +632,8 @@ void Editor::drawBones(ImDrawList* dl) {
         if (hiddenBones_.count((int)i)) continue;
         if (i < pose_.boneActive.size() && !pose_.boneActive[i]) continue;  // skin bone not in an active skin
         const Bone& b = sk_.bones[i];
-        bool selected = (int)i == sel_.bone && sel_.kind == Selection::Bone;
+        bool selected = ((int)i == sel_.bone && sel_.kind == Selection::Bone) ||
+                        std::find(sel_.bones.begin(), sel_.bones.end(), (int)i) != sel_.bones.end();
         bool related = (int)i == sel_.bone && !selected;  // bone of the selected slot
         bool influence = std::find(influences.begin(), influences.end(), (int)i) != influences.end();
         ImU32 col = selected ? theme::kSelect

@@ -105,7 +105,8 @@ void Editor::drawMainToolbar() {
     if (beginGroup("##tools", ImVec2(x, y), h)) {
         float w = ImGui::CalcTextSize("建骨骼 N").x + fh + 16;
         if (iconButton("pose", Icon::Pose, "姿势 B", tool_ == Tool::Pose, w)) setTool(Tool::Pose);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("拖骨骼原点移动，拖骨骼其它位置让它指向鼠标");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("拖骨骼原点移动，拖骨骼其它位置让它指向鼠标\nCtrl+点击多选一条骨骼链，拖其中的骨骼用 IK 摆整条链");
         if (iconButton("weights", Icon::Weights, "权重 G", tool_ == Tool::Weights, w, !animate)) setTool(Tool::Weights);
         if (iconButton("create", Icon::Create, "建骨骼 N", tool_ == Tool::CreateBone, w, !animate)) setTool(Tool::CreateBone);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

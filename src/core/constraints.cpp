@@ -270,6 +270,33 @@ static void applyPath(const Skeleton& sk, Pose& pose, const Constraint& c, const
     }
 }
 
+// ---------------------------------------------------------------- posing (CCD)
+
+std::vector<float> solveChainIk(const Skeleton& sk, const Pose& start, const std::vector<int>& chain, Vec2 target, int iterations) {
+    std::vector<float> out;
+    for (int b : chain) out.push_back(start.local[b].rotation);
+    if (chain.empty()) return out;
+    Pose pose = start;
+    int tipBone = chain.back();
+    for (int it = 0; it < iterations; ++it) {
+        for (int i = (int)chain.size() - 1; i >= 0; --i) {
+            int b = chain[i];
+            Vec2 origin = pose.world[b].origin();
+            Vec2 tip = boneTip(sk.bones[tipBone], pose.world[tipBone]);
+            Vec2 toTip = tip - origin, toTarget = target - origin;
+            if (length(toTip) < 1e-4f || length(toTarget) < 1e-4f) continue;
+            float delta = wrapDeg(angleOf(toTarget) - angleOf(toTip));
+            int p = sk.bones[b].parent;
+            if (p >= 0 && pose.world[p].det() < 0) delta = -delta;
+            pose.local[b].rotation += delta;
+            out[i] = pose.local[b].rotation;
+            updateWorld(sk, pose);
+        }
+        if (length(boneTip(sk.bones[tipBone], pose.world[tipBone]) - target) < 0.01f) break;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- dispatch
 
 void applyConstraints(const Skeleton& sk, Pose& pose) {

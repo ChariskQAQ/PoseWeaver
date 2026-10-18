@@ -14,6 +14,15 @@ void applyConstraints(const Skeleton& sk, Pose& pose);
 // descendants. Used by the solvers; the bone keeps any scale/shear the matrix carries.
 void setBoneWorld(const Skeleton& sk, Pose& pose, int bone, const Affine& world);
 
+// ---- posing ----
+
+// Cyclic coordinate descent: local rotations for `chain` (bones from the top of the chain to
+// the tip bone, each the parent of the next) so the tip of the last bone reaches `target`
+// (world). Starts from `pose`; returns one local rotation per chain bone, kept continuous
+// with the starting rotations.
+std::vector<float> solveChainIk(const Skeleton& sk, const Pose& pose, const std::vector<int>& chain, Vec2 target,
+                                int iterations = 12);
+
 // ---- paths ----
 
 // Bezier segments of a path attachment's world-space control points (3 per path point).

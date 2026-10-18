@@ -380,7 +380,28 @@ void Editor::drawDopesheet() {
     ImGui::InvisibleButton("##ruler", ImVec2(avail.x, rulerH));
     bool rulerHovered = ImGui::IsItemHovered();
     if (rulerHovered && io.MouseWheel != 0) zoomAt(io.MousePos.x, io.MouseWheel);
-    if (ImGui::IsItemActivated() && io.MousePos.x >= keysX0 - 4) {
+    // Scale handles at both ends of the selected keys' time span.
+    float selMin = 1e9f, selMax = -1e9f;
+    if (sheetSelAnim_ == anim_)
+        for (auto& k : sheetSel_) {
+            selMin = std::min(selMin, k.time);
+            selMax = std::max(selMax, k.time);
+        }
+    bool canScale = selMax - selMin > kKeyEpsilon;
+    int handleHit = 0;  // -1 left, 1 right
+    if (canScale && rulerHovered) {
+        if (std::fabs(io.MousePos.x - timeToX(selMin)) < 7) handleHit = -1;
+        else if (std::fabs(io.MousePos.x - timeToX(selMax)) < 7) handleHit = 1;
+        if (handleHit) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (ImGui::IsItemActivated() && handleHit) {
+        sheetDrag_ = SheetDrag{};
+        sheetDrag_.scaling = true;
+        sheetDrag_.pivot = handleHit > 0 ? selMin : selMax;
+        sheetDrag_.origEdge = handleHit > 0 ? selMax : selMin;
+        for (auto& k : sheetSel_) sheetDrag_.origTimes.push_back(k.time);
+        playing_ = false;
+    } else if (ImGui::IsItemActivated() && io.MousePos.x >= keysX0 - 4) {
         sheetDrag_ = SheetDrag{};
         sheetDrag_.scrubbing = true;
         playing_ = false;
@@ -403,6 +424,12 @@ void Editor::drawDopesheet() {
             std::snprintf(buf, sizeof(buf), "%d", f);
             dl->AddText(ImVec2(x + 3, origin.y + 1), dimCol, buf);
         }
+    }
+    if (canScale) {
+        ImU32 hc = IM_COL32(255, 220, 60, 230);
+        float x0 = timeToX(selMin), x1 = timeToX(selMax), yb = origin.y + rulerH;
+        dl->AddLine(ImVec2(x0, yb - 2), ImVec2(x1, yb - 2), (hc & 0x00FFFFFF) | 0x80000000, 2.0f);
+        for (float x : {x0, x1}) dl->AddRectFilled(ImVec2(x - 3, origin.y + rulerH * 0.35f), ImVec2(x + 3, yb), hc, 1.5f);
     }
     for (const KeyMark& m : rowMarks(rows[0])) {  // orange diamonds: frames that have keys
         float x = timeToX(m.time);
@@ -460,6 +487,39 @@ void Editor::drawDopesheet() {
         for (const SheetRow& r : rows)
             for (const KeyMark& m : rowMarks(r)) sheetSel_.push_back({r, m.time});
     };
+
+    // ---- scaling the selection's time span (ruler handles) ----
+    if (sheetDrag_.scaling) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            float edge = xToTime(mouse.x, !io.KeyShift);
+            float span = sheetDrag_.origEdge - sheetDrag_.pivot;
+            float factor = std::fabs(span) > kKeyEpsilon ? (edge - sheetDrag_.pivot) / span : 1.0f;
+            factor = std::max(factor, 0.0f);
+            std::vector<float> targets;
+            bool changed = false;
+            for (size_t i = 0; i < sheetSel_.size() && i < sheetDrag_.origTimes.size(); ++i) {
+                float t = sheetDrag_.pivot + (sheetDrag_.origTimes[i] - sheetDrag_.pivot) * factor;
+                t = std::clamp(io.KeyShift ? t : snapTime(t), 0.0f, an->duration);
+                targets.push_back(t);
+                changed |= std::fabs(t - sheetSel_[i].time) > kKeyEpsilon;
+            }
+            if (changed) {
+                if (!sheetDrag_.checkpointed) {
+                    checkpoint();
+                    sheetDrag_.checkpointed = true;
+                }
+                // Two phases through unique parking times so selected keys never overwrite each other.
+                float park = an->duration + 1000;
+                for (size_t i = 0; i < targets.size(); ++i) moveOne(sheetSel_[i].row, sheetSel_[i].time, park + i);
+                for (size_t i = 0; i < targets.size(); ++i) {
+                    moveOne(sheetSel_[i].row, park + i, targets[i]);
+                    sheetSel_[i].time = targets[i];
+                }
+            }
+        } else {
+            sheetDrag_.scaling = false;
+        }
+    }
 
     // ---- mouse ----
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hoverRow >= 0 && hoverRow < (int)rows.size()) {

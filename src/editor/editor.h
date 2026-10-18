@@ -23,12 +23,13 @@ struct Selection {
     int attachment = -1;  // attachment index inside `slot`
     int index = -1;       // animation, image, event, constraint or skin index
     std::vector<int> vertices;  // selected mesh vertices (MeshEdit tool)
+    std::vector<int> bones;     // pose tool multi-selection (Ctrl+click); chains are posed with IK
     void clear() { *this = Selection{}; }
 };
 
 // Mouse drag in the viewport.
 struct Drag {
-    enum Kind { None, Bone, Attachment, Vertices, BoxSelect, CreateBone, Paint, BoneLength, PoseRotate } kind = None;
+    enum Kind { None, Bone, Attachment, Vertices, BoxSelect, CreateBone, Paint, BoneLength, PoseRotate, PoseIk } kind = None;
     ImVec2 startScreen;
     rig::Vec2 startWorld;
     rig::Vec2 pivotWorld;           // bone origin / attachment centre
@@ -42,6 +43,8 @@ struct Drag {
     int parentBone = -1;            // CreateBone
     bool moved = false;             // passed the drag threshold
     bool checkpointed = false;      // undo snapshot taken for this drag
+    std::vector<int> chain;         // PoseIk: bones from the top of the chain to the dragged bone
+    rig::Pose startPose;            // PoseIk: pose at drag start
 };
 
 // Animate-mode changes that have not been keyed yet (auto key off).
@@ -146,7 +149,10 @@ private:
         bool panning = false;
         bool pressedEmpty = false;  // left press on empty space: click = set time, drag = box select
         bool boxSelecting = false;
+        bool scaling = false;       // dragging a handle of the selected keys' time span
         bool checkpointed = false;
+        float pivot = 0, origEdge = 0;
+        std::vector<float> origTimes;  // selected key times when scaling started
         ImVec2 start;
         SheetRow row{SheetRow::Overview, -1};
         float from = 0;
@@ -171,6 +177,9 @@ private:
 
     // --- graph ---
     unsigned graphHidden_ = 0;             // bit per curve id hidden by the user
+    float graphPps_ = 0, graphScroll_ = 0;  // time zoom (0 = fit) and scroll (seconds)
+    bool graphAutoY_ = true, graphPanning_ = false;
+    float graphVMin_ = -1, graphVMax_ = 1;   // value range when not auto-fitted
     int graphCurve_ = -1, graphKey_ = -1;  // selected key (curve id, key index)
     struct GraphDrag {
         enum Kind { None, Key, Handle1, Handle2, Scrub } kind = None;

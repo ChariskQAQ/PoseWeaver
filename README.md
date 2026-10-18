@@ -56,7 +56,7 @@ Animate 模式下方为 Dopesheet。打帧按钮：绿 = 无关键帧，橙 = �
 |---|---|
 | Tab | Setup / Animate 切换 |
 | C / V / X / Z | 旋转 / 移动 / 缩放 / 斜切 |
-| B | 姿势工具 |
+| B | 姿势工具（Ctrl+点击多选骨骼链，拖动时用 IK 摆整条链） |
 | N / G | 建骨骼 / 权重（仅 Setup） |
 | M | 网格工具：Setup 编辑顶点（Alt+点击加、Del 删），Animate 打变形关键帧 |
 | 右键拖动、滚轮 | 平移、缩放视图；右键单击切回上一个工具 |
@@ -65,6 +65,7 @@ Animate 模式下方为 Dopesheet。打帧按钮：绿 = 无关键帧，橙 = �
 | 空格 / ← → | 播放暂停 / 逐帧 |
 | K | 为所有未打帧的改动打关键帧（关闭自动关键帧时） |
 | F2 | 重命名所选 |
-| Dopesheet 内：Ctrl 点击 / 拖框 / Ctrl+A | 多选关键帧；Del 删除，Ctrl+C / Ctrl+V 复制粘贴到当前帧 |
+| Dopesheet 内：Ctrl 点击 / 拖框 / Ctrl+A | 多选关键帧；Del 删除，Ctrl+C / Ctrl+V 复制粘贴到当前帧；拖标尺上的黄色手柄按比例缩放 |
+| Graph 内：滚轮 / Ctrl+滚轮 / 右键拖动 | 缩放时间 / 缩放数值 / 平移；选中插槽时显示颜色曲线 |
 | Ctrl+Z / Ctrl+Y / Ctrl+S | 撤销 / 重做 / 保存 |
 | Del | 删除所选 |

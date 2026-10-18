@@ -1636,6 +1636,14 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
         frameAllIn_ = 5;
         return;
     }
+    if (scenario == "graphcolor") {
+        mode_ = Mode::Animate;
+        time_ = time;
+        selectSlot(0);
+        focusGraph_ = 3;
+        frameAllIn_ = 5;
+        return;
+    }
     if (scenario == "ghost") {
         mode_ = Mode::Animate;
         time_ = time;
