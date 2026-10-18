@@ -12,6 +12,7 @@
 - 剪裁、边界框、路径附件（插槽属性里 + 剪裁 / + 边界框 / + 路径）
 - 约束：IK、变换、路径、物理（骨骼属性 → 新建约束，或树的“约束”节点右键），数值可打关键帧，物理实时预览并可烘焙
 - 补偿：工具栏“补偿 → 骨骼/图片”，调整骨骼时子骨骼/附件保持原位
+- 皮肤：树的“皮肤”节点新建/激活（可多选组合），附件“移入皮肤...”生成占位，占位属性里为每个皮肤换图/复制；骨骼与约束可设为皮肤专用
 - 蒙皮：绑定多根骨骼并自动计算权重，笔刷涂抹（Ctrl 减少）、锁定骨骼、数值设置、平滑、修剪、左右镜像
 - 时间轴：多动画、播放/倒放/循环/变速；Dopesheet 多选/框选、整体拖动、复制粘贴、右键改曲线；洋葱皮
 - Graph 曲线编辑：贝塞尔手柄、缓入缓出等预设
@@ -38,7 +39,7 @@ build\Release\RigEditor.exe --demo samples\arm.png        :: 两骨骼蒙皮手�
 build\Release\RigEditor.exe path\to\project.rig.json
 ```
 
-`--weights` / `--mesh` / `--clip` / `--ik` / `--path` / `--ghost` / `--bake` 以对应场景打开 demo，`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
+`--weights` / `--mesh` / `--clip` / `--ik` / `--path` / `--ghost` / `--bake` / `--skin` 以对应场景打开 demo（`--skin` 需要 `samples/arm_alt.png`），`--graph` 打开 Graph 视图，`--time <秒>` 指定 demo 时间，`--screenshot out.png` 渲染几帧后截图退出（用于自动检查）。
 
 ## 界面
 

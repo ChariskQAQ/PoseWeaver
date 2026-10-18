@@ -13,7 +13,14 @@ struct Pose {
     std::vector<int> drawOrder;       // slot indices, back to front
     std::map<std::pair<int, int>, std::vector<Vec2>> deform;  // (slot, attachment) -> vertex offsets
     std::vector<ConstraintValues> constraints;                // per constraint: setup or animated values
+    std::vector<int> skins;            // active skins (later ones win); set by the caller
+    std::vector<char> boneActive;      // per bone: false when skin-required and not in an active skin
+    std::vector<char> constraintActive;
 };
+// The attachment a slot shows in this pose (resolved through the active skins), or null.
+const Attachment* poseAttachment(const Skeleton& sk, const Pose& pose, int slot);
+// Bone / constraint activity from the pose's active skins (called by updateWorld).
+void updateActivity(const Skeleton& sk, Pose& pose);
 // Deform offsets of an attachment in this pose, or null.
 const std::vector<Vec2>* findDeform(const Pose& pose, int slot, int attachment);
 
@@ -23,8 +30,8 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
 void updateWorld(const Skeleton& sk, Pose& pose);
 // World transforms of `bone` and its descendants from `applied` (used by constraint solvers).
 void updateSubtree(const Skeleton& sk, Pose& pose, int bone);
-Pose makeSetupPose(const Skeleton& sk);
-Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time);
+Pose makeSetupPose(const Skeleton& sk, const std::vector<int>& skins = {});
+Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time, const std::vector<int>& skins = {});
 
 float sample(const std::vector<FloatKey>& keys, float t, float fallback);
 Vec2 sample(const std::vector<Vec2Key>& keys, float t, Vec2 fallback);

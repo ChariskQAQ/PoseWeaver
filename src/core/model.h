@@ -33,6 +33,7 @@ struct Bone {
     int parent = -1;
     float length = 0;
     Transform setup;
+    bool skinRequired = false;  // only active when an active skin lists it
 };
 
 struct Image {
@@ -66,6 +67,9 @@ struct Attachment {
     int endSlot = -1;    // clipping: last slot (index) that is clipped, -1 = all following slots
     // Path: vertices are Bezier control points, three per path point: in-handle, point, out-handle.
     bool closed = false;
+    // Skin placeholder: has no content of its own; the active skins provide an attachment
+    // registered under this attachment's name for this slot.
+    bool skinPlaceholder = false;
 
     bool isWeighted() const { return !weights.empty(); }
     // Polygons and paths have no uvs or triangles (paths are edited like polygons).
@@ -150,6 +154,24 @@ struct SlotTimeline {
     }
 };
 
+// ---- skins ----
+
+struct SkinEntry {
+    int slot = 0;
+    std::string placeholder;  // name of the placeholder attachment in the slot
+    Attachment attachment;
+};
+
+struct Skin {
+    std::string name;
+    std::vector<SkinEntry> attachments;
+    std::vector<int> bones;        // skin-required bones this skin activates
+    std::vector<int> constraints;  // skin-required constraints this skin activates
+
+    Attachment* find(int slot, const std::string& placeholder);
+    const Attachment* find(int slot, const std::string& placeholder) const;
+};
+
 // ---- constraints ----
 
 enum class ConstraintType { Ik, Transform, Path, Physics };
@@ -183,6 +205,7 @@ struct Constraint {
     // Physics
     bool physX = true, physY = true, physRotate = true;
     float inertia = 1, strength = 100, damping = 0.25f, mass = 1, limit = 5000;  // damping 1 = no wobble
+    bool skinRequired = false;  // only active when an active skin lists it
 };
 // Sensible default values for a new constraint of `type`.
 ConstraintValues defaultConstraintValues(ConstraintType type);
@@ -212,6 +235,7 @@ struct Skeleton {
     std::vector<Image> images;
     std::vector<EventDef> events;
     std::vector<Constraint> constraints;  // applied in this order after the bone hierarchy
+    std::vector<Skin> skins;
     std::vector<Animation> animations;
 
     int findBone(const std::string& name) const;
@@ -238,6 +262,12 @@ struct Skeleton {
     void removeEvent(int event);
     // Removes a constraint and its keys.
     void removeConstraint(int constraint);
+    void removeSkin(int skin);
+    std::string uniqueSkinName(const std::string& base) const;
+    // Attachment shown for slot attachment `index` with `activeSkins` (later skins win), or null
+    // when it is a placeholder no active skin fills.
+    const Attachment* resolve(const std::vector<int>& activeSkins, int slot, int index) const;
+    Attachment* resolve(const std::vector<int>& activeSkins, int slot, int index);
     // Swaps two constraints (application order), keeping their keys.
     void swapConstraints(int a, int b);
     // Removes an attachment from a slot, fixing the active attachment, attachment keys and deform keys.

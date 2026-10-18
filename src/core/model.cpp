@@ -197,6 +197,18 @@ static void remapPathTargets(std::vector<Constraint>& constraints, const std::ve
             c.target = c.target < (int)slotRemap.size() ? slotRemap[c.target] : -1;
 }
 
+static void remapSkinSlots(std::vector<Skin>& skins, const std::vector<int>& slotRemap) {
+    for (auto& skin : skins) {
+        std::vector<SkinEntry> kept;
+        for (auto& e : skin.attachments)
+            if (e.slot >= 0 && e.slot < (int)slotRemap.size() && slotRemap[e.slot] >= 0) {
+                e.slot = slotRemap[e.slot];
+                kept.push_back(std::move(e));
+            }
+        skin.attachments = std::move(kept);
+    }
+}
+
 static void remapClipEnds(std::vector<Slot>& slots, const std::vector<int>& slotRemap) {
     for (auto& s : slots)
         for (auto& a : s.attachments)
@@ -267,6 +279,24 @@ void Skeleton::removeBone(int bone) {
     }
     remapSlots(animations, slotRemap);
     remapClipEnds(slots, slotRemap);
+    remapSkinSlots(skins, slotRemap);
+    for (auto& skin : skins) {
+        std::vector<int> kept;
+        for (int b : skin.bones)
+            if (b < (int)remap.size() && remap[b] >= 0) kept.push_back(remap[b]);
+        skin.bones = kept;
+        for (auto& e : skin.attachments)  // weights on removed bones: same rules as slot attachments
+            for (auto& list : e.attachment.weights) {
+                list.erase(std::remove_if(list.begin(), list.end(), [&](const VertexWeight& w) { return w.bone >= (int)remap.size() || remap[w.bone] < 0; }),
+                           list.end());
+                float total = 0;
+                for (auto& w : list) total += w.weight;
+                for (auto& w : list) {
+                    w.bone = remap[w.bone];
+                    if (total > 0) w.weight /= total;
+                }
+            }
+    }
 
     for (int c = (int)constraints.size() - 1; c >= 0; --c) {
         Constraint& con = constraints[c];
@@ -284,9 +314,51 @@ void Skeleton::removeBone(int bone) {
     }
 }
 
+Attachment* Skin::find(int slot, const std::string& placeholder) {
+    for (auto& e : attachments)
+        if (e.slot == slot && e.placeholder == placeholder) return &e.attachment;
+    return nullptr;
+}
+
+const Attachment* Skin::find(int slot, const std::string& placeholder) const {
+    return const_cast<Skin*>(this)->find(slot, placeholder);
+}
+
+std::string Skeleton::uniqueSkinName(const std::string& base) const {
+    return uniqueName(base, [&](const std::string& n) {
+        for (auto& s : skins)
+            if (s.name == n) return true;
+        return false;
+    });
+}
+
+void Skeleton::removeSkin(int skin) {
+    if (skin >= 0 && skin < (int)skins.size()) skins.erase(skins.begin() + skin);
+}
+
+Attachment* Skeleton::resolve(const std::vector<int>& activeSkins, int slot, int index) {
+    if (slot < 0 || slot >= (int)slots.size() || index < 0 || index >= (int)slots[slot].attachments.size()) return nullptr;
+    Attachment& a = slots[slot].attachments[index];
+    if (!a.skinPlaceholder) return &a;
+    for (auto it = activeSkins.rbegin(); it != activeSkins.rend(); ++it)
+        if (*it >= 0 && *it < (int)skins.size())
+            if (Attachment* found = skins[*it].find(slot, a.name)) return found;
+    return nullptr;
+}
+
+const Attachment* Skeleton::resolve(const std::vector<int>& activeSkins, int slot, int index) const {
+    return const_cast<Skeleton*>(this)->resolve(activeSkins, slot, index);
+}
+
 void Skeleton::removeConstraint(int c) {
     if (c < 0 || c >= (int)constraints.size()) return;
     constraints.erase(constraints.begin() + c);
+    for (auto& skin : skins) {
+        std::vector<int> kept;
+        for (int i : skin.constraints)
+            if (i != c) kept.push_back(i > c ? i - 1 : i);
+        skin.constraints = kept;
+    }
     for (auto& an : animations) {
         std::map<int, std::vector<ConstraintKey>> keys;
         for (auto& [i, k] : an.constraints)
@@ -298,6 +370,8 @@ void Skeleton::removeConstraint(int c) {
 void Skeleton::swapConstraints(int a, int b) {
     if (a < 0 || b < 0 || a >= (int)constraints.size() || b >= (int)constraints.size() || a == b) return;
     std::swap(constraints[a], constraints[b]);
+    for (auto& skin : skins)
+        for (int& i : skin.constraints) i = i == a ? b : (i == b ? a : i);
     for (auto& an : animations) {
         auto ia = an.constraints.find(a), ib = an.constraints.find(b);
         std::vector<ConstraintKey> ka, kb;
@@ -329,6 +403,7 @@ void Skeleton::removeSlot(int slot) {
     remapSlots(animations, slotRemap);
     remapClipEnds(slots, slotRemap);
     remapPathTargets(constraints, slotRemap);
+    remapSkinSlots(skins, slotRemap);
 }
 
 void Skeleton::swapSlots(int a, int b) {
@@ -339,12 +414,20 @@ void Skeleton::swapSlots(int a, int b) {
     remapSlots(animations, slotRemap);
     remapClipEnds(slots, slotRemap);
     remapPathTargets(constraints, slotRemap);
+    remapSkinSlots(skins, slotRemap);
 }
 
 void Skeleton::removeAttachment(int slot, int attachment) {
     if (slot < 0 || slot >= (int)slots.size()) return;
     Slot& s = slots[slot];
     if (attachment < 0 || attachment >= (int)s.attachments.size()) return;
+    if (s.attachments[attachment].skinPlaceholder) {
+        const std::string name = s.attachments[attachment].name;
+        for (auto& skin : skins)
+            skin.attachments.erase(std::remove_if(skin.attachments.begin(), skin.attachments.end(),
+                                                  [&](const SkinEntry& e) { return e.slot == slot && e.placeholder == name; }),
+                                   skin.attachments.end());
+    }
     s.attachments.erase(s.attachments.begin() + attachment);
     if (s.activeAttachment == attachment) s.activeAttachment = -1;
     else if (s.activeAttachment > attachment) --s.activeAttachment;

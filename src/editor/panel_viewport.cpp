@@ -67,8 +67,14 @@ int Editor::pickBone(ImVec2 screen) const {
 int Editor::attachmentIndex(int slot, const Attachment* att) const {
     if (!att || slot < 0 || slot >= (int)sk_.slots.size()) return -1;
     const auto& list = sk_.slots[slot].attachments;
-    if (list.empty() || att < &list.front() || att > &list.back()) return -1;
-    return (int)(att - &list.front());
+    if (!list.empty() && att >= &list.front() && att <= &list.back()) return (int)(att - &list.front());
+    // A skin attachment stands for the placeholder with the same name in the slot.
+    for (const Skin& skin : sk_.skins)
+        for (const SkinEntry& e : skin.attachments)
+            if (e.slot == slot && &e.attachment == att)
+                for (size_t i = 0; i < list.size(); ++i)
+                    if (list[i].skinPlaceholder && list[i].name == e.placeholder) return (int)i;
+    return -1;
 }
 
 const std::vector<Vec2>* Editor::poseDeform(int slot, const Attachment* att) const {
@@ -86,9 +92,9 @@ int Editor::pickSlot(Vec2 world) const {
         int s = pose_.drawOrder[i];
         if (hiddenSlots_.count(s)) continue;
         const Slot& slot = sk_.slots[s];
-        int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
-        if (a < 0 || a >= (int)slot.attachments.size()) continue;
-        const Attachment& att = slot.attachments[a];
+        const Attachment* resolved = poseAttachment(sk_, pose_, s);
+        if (!resolved) continue;
+        const Attachment& att = *resolved;
         if (att.isPolygon()) {
             if (view_.polygonsVisible && pointInPolygon(world, attachmentVertices(s, att))) return s;
             continue;
@@ -471,9 +477,9 @@ void Editor::drawSlots(ImDrawList* dl) {
         } reset{endsHere, clipEnd, clip};
         if (hiddenSlots_.count(s)) continue;
         const Slot& slot = sk_.slots[s];
-        int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : -1;
-        if (a < 0 || a >= (int)slot.attachments.size()) continue;
-        const Attachment& att = slot.attachments[a];
+        const Attachment* resolved = poseAttachment(sk_, pose_, s);
+        if (!resolved) continue;
+        const Attachment& att = *resolved;
         if (att.isPolygon()) {
             std::vector<Vec2> poly = attachmentVertices(s, att);
             if (att.type == AttachmentType::Clipping) {
@@ -589,6 +595,7 @@ void Editor::drawBones(ImDrawList* dl) {
     const float u = uiScale_;
     for (size_t i = 0; i < sk_.bones.size(); ++i) {
         if (hiddenBones_.count((int)i)) continue;
+        if (i < pose_.boneActive.size() && !pose_.boneActive[i]) continue;  // skin bone not in an active skin
         const Bone& b = sk_.bones[i];
         bool selected = (int)i == sel_.bone && sel_.kind == Selection::Bone;
         bool related = (int)i == sel_.bone && !selected;  // bone of the selected slot
@@ -631,8 +638,9 @@ void Editor::drawPoseImages(ImDrawList* dl, const Pose& pose, ImVec4 tint) {
         if (hiddenSlots_.count(s)) continue;
         const Slot& slot = sk_.slots[s];
         int a = s < (int)pose.slotAttachment.size() ? pose.slotAttachment[s] : -1;
-        if (a < 0 || a >= (int)slot.attachments.size()) continue;
-        const Attachment& att = slot.attachments[a];
+        const Attachment* resolved = poseAttachment(sk_, pose, s);
+        if (!resolved) continue;
+        const Attachment& att = *resolved;
         if (att.isPolygon() || att.image < 0 || att.image >= (int)textures_.size() || !textures_[att.image].id) continue;
         computeGeometry(sk_, pose, slot, att, g, findDeform(pose, s, a));
         const Color& c = s < (int)pose.slotColor.size() ? pose.slotColor[s] : slot.color;
@@ -659,7 +667,7 @@ void Editor::drawGhosts(ImDrawList* dl) {
             else if (t < 0 || t > an->duration) continue;
             float alpha = ghostAlpha_ * (1.0f - (k - 1) / (float)(count + 1));
             ImVec4 tint = side == 0 ? ImVec4(1.0f, 0.45f, 0.45f, alpha) : ImVec4(0.45f, 1.0f, 0.55f, alpha);
-            drawPoseImages(dl, makeAnimatedPose(sk_, an, t), tint);
+            drawPoseImages(dl, makeAnimatedPose(sk_, an, t, activeSkins_), tint);
         }
     }
 }

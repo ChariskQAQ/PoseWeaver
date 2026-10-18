@@ -116,7 +116,41 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
     if (order && order->order.size() == sk.slots.size()) pose.drawOrder = order->order;
 }
 
+const Attachment* poseAttachment(const Skeleton& sk, const Pose& pose, int slot) {
+    if (slot < 0 || slot >= (int)sk.slots.size()) return nullptr;
+    int bone = sk.slots[slot].bone;
+    if (bone < (int)pose.boneActive.size() && !pose.boneActive[bone]) return nullptr;
+    int a = slot < (int)pose.slotAttachment.size() ? pose.slotAttachment[slot] : sk.slots[slot].activeAttachment;
+    return sk.resolve(pose.skins, slot, a);
+}
+
+void updateActivity(const Skeleton& sk, Pose& pose) {
+    auto inSkins = [&](auto member) {
+        for (int s : pose.skins)
+            if (s >= 0 && s < (int)sk.skins.size() && member(sk.skins[s])) return true;
+        return false;
+    };
+    pose.boneActive.assign(sk.bones.size(), 1);
+    for (int i : sk.updateOrder()) {
+        const Bone& b = sk.bones[i];
+        bool active = b.parent < 0 || pose.boneActive[b.parent];
+        if (active && b.skinRequired)
+            active = inSkins([&](const Skin& s) { return std::find(s.bones.begin(), s.bones.end(), i) != s.bones.end(); });
+        pose.boneActive[i] = active;
+    }
+    pose.constraintActive.assign(sk.constraints.size(), 1);
+    for (size_t c = 0; c < sk.constraints.size(); ++c) {
+        const Constraint& con = sk.constraints[c];
+        bool active = !con.skinRequired || inSkins([&](const Skin& s) {
+            return std::find(s.constraints.begin(), s.constraints.end(), (int)c) != s.constraints.end();
+        });
+        for (int b : con.bones) active = active && b < (int)pose.boneActive.size() && pose.boneActive[b];
+        pose.constraintActive[c] = active;
+    }
+}
+
 void updateWorld(const Skeleton& sk, Pose& pose) {
+    updateActivity(sk, pose);
     pose.world.resize(sk.bones.size());
     pose.applied = pose.local;
     for (int i : sk.updateOrder()) {
@@ -140,15 +174,17 @@ void updateSubtree(const Skeleton& sk, Pose& pose, int bone) {
     }
 }
 
-Pose makeSetupPose(const Skeleton& sk) {
+Pose makeSetupPose(const Skeleton& sk, const std::vector<int>& skins) {
     Pose p;
+    p.skins = skins;
     resetToSetup(sk, p);
     updateWorld(sk, p);
     return p;
 }
 
-Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time) {
+Pose makeAnimatedPose(const Skeleton& sk, const Animation* anim, float time, const std::vector<int>& skins) {
     Pose p;
+    p.skins = skins;
     resetToSetup(sk, p);
     if (anim) applyAnimation(sk, *anim, time, p);
     updateWorld(sk, p);

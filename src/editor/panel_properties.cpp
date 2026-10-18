@@ -75,6 +75,7 @@ void Editor::drawProperties() {
     case Selection::Image: propertiesImage(sel_.index); break;
     case Selection::Event: propertiesEvent(sel_.index); break;
     case Selection::Constraint: propertiesConstraint(sel_.index); break;
+    case Selection::Skin: propertiesSkin(sel_.index); break;
     default:
         ImGui::TextDisabled("未选择");
         ImGui::Spacing();
@@ -95,6 +96,7 @@ void Editor::drawProperties() {
         case Selection::Animation: renameBuf_ = sk_.animations[sel_.index].name; break;
         case Selection::Event: renameBuf_ = sk_.events[sel_.index].name; break;
         case Selection::Constraint: renameBuf_ = sk_.constraints[sel_.index].name; break;
+        case Selection::Skin: renameBuf_ = sk_.skins[sel_.index].name; break;
         default: renameBuf_.clear(); break;
         }
         if (!renameBuf_.empty()) ImGui::OpenPopup("重命名");
@@ -131,6 +133,11 @@ void Editor::propertiesSkeleton() {
     }
     if (ImGui::Button("新建动画")) selectAnimation(createAnimation());
     ImGui::SameLine();
+    if (ImGui::Button("新建皮肤")) {
+        selectSkin(createSkin("skin"));
+        return;
+    }
+    ImGui::SameLine();
     if (ImGui::Button("新建事件")) {
         checkpoint();
         EventDef e;
@@ -162,6 +169,17 @@ void Editor::propertiesBone(int b) {
         } else {
             ImGui::TextDisabled("(无)");
         }
+        propLabel("皮肤专用");
+        ImGui::BeginDisabled(!setup);
+        bool req = bone.skinRequired;
+        if (ImGui::Checkbox("##skinreq", &req)) {
+            checkpoint();
+            bone.skinRequired = req;
+            updatePose();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("勾选后，只有激活的皮肤包含这根骨骼时它（及其子骨骼、插槽）才生效");
+        ImGui::EndDisabled();
         propLabel("长度");
         ImGui::BeginDisabled(!setup);
         float len = bone.length;
@@ -299,8 +317,13 @@ void Editor::propertiesSlot(int s) {
 
 void Editor::propertiesAttachment(int s, int a) {
     Slot& slot = sk_.slots[s];
-    Attachment& att = slot.attachments[a];
     bool setup = mode_ == Mode::Setup;
+    if (slot.attachments[a].skinPlaceholder) {
+        propertiesPlaceholder(s, a);
+        if (!editableAttachment(s, a)) return;
+        ImGui::Spacing();
+    }
+    Attachment& att = *editableAttachment(s, a);
     bool mesh = att.type == AttachmentType::Mesh;
     const char* typeName = mesh ? "网格" : att.type == AttachmentType::Clipping ? "剪裁"
                          : att.type == AttachmentType::BoundingBox  ? "边界框"
@@ -310,9 +333,21 @@ void Editor::propertiesAttachment(int s, int a) {
               : att.type == AttachmentType::BoundingBox ? Icon::BoundingBox
               : att.type == AttachmentType::Path        ? Icon::PathC
                                                         : Icon::Region;
-    if (propertiesHeader((int)icon, typeName, att.name, true, setup)) {
+    if (slot.attachments[a].skinPlaceholder) {
+        ImGui::SeparatorText((std::string("皮肤中的") + typeName + "：" + att.name).c_str());
+    } else if (propertiesHeader((int)icon, typeName, att.name, true, setup)) {
         deleteSelection();
         return;
+    }
+    if (setup && !slot.attachments[a].skinPlaceholder && !sk_.skins.empty()) {
+        if (ImGui::Button("移入皮肤...")) ImGui::OpenPopup("toskin");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("把这个附件放进某个皮肤，插槽里留下同名占位；其他皮肤可提供各自的版本");
+        if (ImGui::BeginPopup("toskin")) {
+            for (int k = 0; k < (int)sk_.skins.size(); ++k)
+                if (ImGui::MenuItem(sk_.skins[k].name.c_str())) moveAttachmentToSkin(s, a, k);
+            ImGui::EndPopup();
+            return;
+        }
     }
     if (beginProps("att")) {
         propLabel("插槽");
@@ -555,6 +590,16 @@ void Editor::propertiesConstraint(int ci) {
     };
 
     if (beginProps("con")) {
+        propLabel("皮肤专用");
+        ImGui::BeginDisabled(!setup);
+        bool req = c.skinRequired;
+        if (ImGui::Checkbox("##skinreq", &req)) {
+            checkpoint();
+            c.skinRequired = req;
+            updatePose();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("勾选后，只有激活的皮肤包含这个约束时它才生效");
+        ImGui::EndDisabled();
         propLabel("顺序");
         ImGui::Text("%d / %d", ci + 1, (int)sk_.constraints.size());
         ImGui::SameLine();
@@ -757,6 +802,172 @@ void Editor::propertiesConstraint(int ci) {
         ImGui::EndDisabled();
     }
     if (c.type == ConstraintType::Path) ImGui::TextDisabled("选中路径附件后用网格工具 (M) 编辑：方点是路径点，圆点是手柄，Alt+点击加点。");
+}
+
+void Editor::propertiesSkin(int k) {
+    Skin& skin = sk_.skins[k];
+    bool setup = mode_ == Mode::Setup;
+    if (propertiesHeader((int)Icon::Skin, "皮肤", skin.name, true, setup)) {
+        deleteSelection();
+        return;
+    }
+    bool active = std::find(activeSkins_.begin(), activeSkins_.end(), k) != activeSkins_.end();
+    if (ImGui::Checkbox("激活", &active)) toggleSkin(k);
+    ImGui::SameLine();
+    if (ImGui::Button("只激活这个")) {
+        activeSkins_ = {k};
+        physics_.reset();
+        updatePose();
+    }
+    ImGui::SameLine();
+    if (setup && ImGui::Button("复制皮肤")) {
+        checkpoint();
+        Skin copy = skin;
+        copy.name = sk_.uniqueSkinName(skin.name + "_copy");
+        sk_.skins.push_back(copy);
+        selectSkin((int)sk_.skins.size() - 1);
+        return;
+    }
+    ImGui::TextDisabled("可同时激活多个皮肤组合使用，同一占位由后激活的皮肤提供。");
+
+    // Attachments
+    ImGui::SeparatorText("附件");
+    if (skin.attachments.empty()) ImGui::TextDisabled("还没有附件：选中插槽里的附件 → “移入皮肤...”。");
+    for (size_t i = 0; i < skin.attachments.size(); ++i) {
+        const SkinEntry& e = skin.attachments[i];
+        if (e.slot < 0 || e.slot >= (int)sk_.slots.size()) continue;
+        ImGui::PushID((int)i);
+        std::string label = sk_.slots[e.slot].name + " / " + e.placeholder + "  →  " + e.attachment.name;
+        if (ImGui::Selectable(label.c_str())) {
+            if (!active) toggleSkin(k);
+            const auto& list = sk_.slots[e.slot].attachments;
+            for (size_t a = 0; a < list.size(); ++a)
+                if (list[a].skinPlaceholder && list[a].name == e.placeholder) selectAttachment(e.slot, (int)a);
+            ImGui::PopID();
+            return;
+        }
+        ImGui::PopID();
+    }
+
+    // Bones and constraints this skin activates
+    auto memberList = [&](const char* title, std::vector<int>& members, int count, auto&& nameOf, auto&& markRequired) {
+        ImGui::SeparatorText(title);
+        for (size_t i = 0; i < members.size(); ++i) {
+            ImGui::PushID((int)i);
+            ImGui::BeginDisabled(!setup);
+            if (ImGui::SmallButton("x")) {
+                checkpoint();
+                members.erase(members.begin() + i);
+                ImGui::EndDisabled();
+                ImGui::PopID();
+                updatePose();
+                return;
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextUnformatted(nameOf(members[i]).c_str());
+            ImGui::PopID();
+        }
+        ImGui::BeginDisabled(!setup);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo((std::string("##add") + title).c_str(), "+ 添加")) {
+            for (int i = 0; i < count; ++i) {
+                if (std::find(members.begin(), members.end(), i) != members.end()) continue;
+                ImGui::PushID(i);
+                if (ImGui::Selectable(nameOf(i).c_str())) {
+                    checkpoint();
+                    members.push_back(i);
+                    markRequired(i);  // adding to a skin only matters for skin-required items
+                    updatePose();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+    };
+    memberList("皮肤骨骼", skin.bones, (int)sk_.bones.size(), [&](int b) { return sk_.bones[b].name; },
+               [&](int b) { sk_.bones[b].skinRequired = true; });
+    memberList("皮肤约束", skin.constraints, (int)sk_.constraints.size(), [&](int c) { return sk_.constraints[c].name; },
+               [&](int c) { sk_.constraints[c].skinRequired = true; });
+}
+
+void Editor::propertiesPlaceholder(int s, int a) {
+    Slot& slot = sk_.slots[s];
+    Attachment& ph = slot.attachments[a];
+    bool setup = mode_ == Mode::Setup;
+    if (propertiesHeader((int)Icon::Skin, "皮肤占位", ph.name, true, setup)) {
+        deleteSelection();
+        return;
+    }
+    ImGui::TextDisabled("插槽 %s 里的占位，实际内容来自激活的皮肤。", slot.name.c_str());
+    if (!ImGui::BeginTable("phskins", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) return;
+    ImGui::TableSetupColumn("皮肤", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+    ImGui::TableSetupColumn("附件", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 9);
+    ImGui::TableHeadersRow();
+    const Attachment* current = editableAttachment(s, a);
+    for (int k = 0; k < (int)sk_.skins.size(); ++k) {
+        Skin& skin = sk_.skins[k];
+        Attachment* entry = skin.find(s, ph.name);
+        ImGui::PushID(k);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        bool active = std::find(activeSkins_.begin(), activeSkins_.end(), k) != activeSkins_.end();
+        ImGui::TextColored(active ? ImVec4(1, 1, 1, 1) : ImVec4(0.6f, 0.6f, 0.6f, 1), "%s", skin.name.c_str());
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextUnformatted(entry ? entry->name.c_str() : "(无)");
+        ImGui::TableSetColumnIndex(2);
+        if (entry && ImGui::SmallButton("编辑")) {
+            activeSkins_ = {k};
+            updatePose();
+        }
+        if (setup) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("图片...")) {
+                std::string path = openFileDialog("图片 (png/jpg/bmp/tga)", "*.png;*.jpg;*.jpeg;*.bmp;*.tga");
+                if (!path.empty() && importImage(path)) {
+                    // importImage made a new slot with a region; take its attachment for this skin.
+                    Attachment img = sk_.slots.back().attachments[0];
+                    sk_.slots.pop_back();
+                    if (current && current->type == AttachmentType::Region) img.transform = current->transform;
+                    Skin& target = sk_.skins[k];
+                    if (Attachment* existing = target.find(s, ph.name)) *existing = img;
+                    else target.attachments.push_back({s, ph.name, img});
+                    activeSkins_ = {k};
+                    selectAttachment(s, a);
+                    updatePose();
+                    ImGui::PopID();
+                    ImGui::EndTable();
+                    return;
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("用一张图片作为这个皮肤的附件（位置沿用当前显示的附件）");
+            if (current && current != entry) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("复制")) {
+                    checkpoint();
+                    Attachment copy = *current;
+                    if (entry) *entry = copy;
+                    else skin.attachments.push_back({s, ph.name, copy});
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("把当前显示的附件复制到这个皮肤（之后可换图或改网格）");
+            }
+            if (entry) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x")) {
+                    checkpoint();
+                    skin.attachments.erase(std::remove_if(skin.attachments.begin(), skin.attachments.end(),
+                                                          [&](const SkinEntry& e) { return e.slot == s && e.placeholder == ph.name; }),
+                                           skin.attachments.end());
+                    updatePose();
+                }
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+    if (!current) ImGui::TextColored(ImVec4(1, 0.7f, 0.3f, 1), "激活的皮肤都没有提供这个附件，插槽什么都不显示。");
 }
 
 void Editor::propertiesImage(int i) {

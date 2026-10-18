@@ -15,11 +15,11 @@ enum class Tool { Rotate, Translate, Scale, Shear, Pose, CreateBone, MeshEdit, W
 enum class Axes { Local, Parent, World };
 
 struct Selection {
-    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image, Event, Constraint } kind = None;
+    enum Kind { None, Skeleton, Bone, Slot, Attachment, Animation, Image, Event, Constraint, Skin } kind = None;
     int bone = -1;        // also set for slots/attachments (their bone), used by transform tools
     int slot = -1;
     int attachment = -1;  // attachment index inside `slot`
-    int index = -1;       // animation, image, event or constraint index
+    int index = -1;       // animation, image, event, constraint or skin index
     std::vector<int> vertices;  // selected mesh vertices (MeshEdit tool)
     void clear() { *this = Selection{}; }
 };
@@ -192,6 +192,14 @@ private:
     bool showDemo_ = false;
     bool resetLayout_ = false;
     rig::PhysicsState physics_;
+    std::vector<int> activeSkins_;  // skins shown / edited (later ones win), editor state only
+    void toggleSkin(int skin);
+    int createSkin(const std::string& name);
+    // The attachment that a slot attachment index stands for with the active skins (null when a
+    // placeholder is not filled).
+    rig::Attachment* editableAttachment(int slot, int attachment);
+    // Moves a slot attachment into `skin` and turns the slot entry into a placeholder.
+    void moveAttachmentToSkin(int slot, int attachment, int skin);
     bool physicsOn_ = true;
     float physicsDt_ = 0;  // time to simulate in the next updatePose (set once per frame)
     struct FiredEvent { std::string text; float timeLeft; };
@@ -260,6 +268,8 @@ private:
     void propertiesImage(int i);
     void propertiesEvent(int e);
     void propertiesConstraint(int c);
+    void propertiesSkin(int skin);
+    void propertiesPlaceholder(int slot, int attachment);
     bool propertiesHeader(int icon, const std::string& type, const std::string& name, bool canRename, bool canDelete);
 
     // selection
@@ -269,6 +279,7 @@ private:
     void selectAnimation(int a);
     void selectEvent(int e);
     void selectConstraint(int c);
+    void selectSkin(int skin);
     void validateSelection();
 
     // document operations

@@ -752,6 +752,88 @@ static void testMirrorWeights() {
     for (size_t v = 0; v < world.size(); ++v) CHECK(near(after[v], world[v]));
 }
 
+static void testSkins() {
+    // A slot with a placeholder "body" and two skins providing different images.
+    Skeleton sk;
+    int root = sk.addBone("root", -1, {}, 0);
+    Transform ht;
+    ht.y = 100;
+    int hat = sk.addBone("hat", root, ht, 20);
+    sk.bones[hat].skinRequired = true;
+    sk.images = {{"a.png", 10, 10}, {"b.png", 20, 20}};
+    Slot slot;
+    slot.name = "body";
+    slot.bone = root;
+    Attachment ph;
+    ph.name = "body";
+    ph.skinPlaceholder = true;
+    slot.attachments.push_back(ph);
+    slot.activeAttachment = 0;
+    sk.slots.push_back(slot);
+    Slot hatSlot;
+    hatSlot.name = "hat";
+    hatSlot.bone = hat;
+    Attachment hatImg;
+    hatImg.name = "hat";
+    hatImg.image = 0;
+    hatSlot.attachments.push_back(hatImg);
+    hatSlot.activeAttachment = 0;
+    sk.slots.push_back(hatSlot);
+    Skin boy, girl;
+    boy.name = "boy";
+    girl.name = "girl";
+    Attachment a;
+    a.name = "boy_body";
+    a.image = 0;
+    boy.attachments.push_back({0, "body", a});
+    a.name = "girl_body";
+    a.image = 1;
+    girl.attachments.push_back({0, "body", a});
+    girl.bones.push_back(hat);
+    sk.skins = {boy, girl};
+
+    Pose none = makeSetupPose(sk);
+    CHECK(poseAttachment(sk, none, 0) == nullptr);  // nothing fills the placeholder
+    CHECK(poseAttachment(sk, none, 1) == nullptr);  // hat bone inactive without the girl skin
+    Pose pb = makeSetupPose(sk, {0});
+    CHECK(poseAttachment(sk, pb, 0) && poseAttachment(sk, pb, 0)->image == 0);
+    CHECK(!pb.boneActive[hat]);
+    Pose pg = makeSetupPose(sk, {1});
+    CHECK(poseAttachment(sk, pg, 0)->image == 1 && pg.boneActive[hat] && poseAttachment(sk, pg, 1));
+    // Combining: the later skin wins for shared placeholders, bones from both are active.
+    Pose both = makeSetupPose(sk, {1, 0});
+    CHECK(poseAttachment(sk, both, 0)->image == 0 && both.boneActive[hat]);
+
+    // Skin-required constraints only run while their skin is active.
+    Constraint tc;
+    tc.type = ConstraintType::Transform;
+    tc.bones = {hat};
+    tc.target = root;
+    tc.values = defaultConstraintValues(ConstraintType::Transform);
+    tc.skinRequired = true;
+    sk.constraints.push_back(tc);
+    sk.skins[1].constraints.push_back(0);
+    Pose off = makeSetupPose(sk, {0});
+    Pose on = makeSetupPose(sk, {1});
+    CHECK(near(off.world[hat].origin(), {0, 100}) && near(on.world[hat].origin(), {0, 0}));
+
+    // Round trip and bookkeeping.
+    std::string text = toJson(sk);
+    Skeleton loaded;
+    std::string err;
+    CHECK(fromJson(text, loaded, &err));
+    CHECK(toJson(loaded) == text);
+    CHECK(loaded.skins.size() == 2 && loaded.slots[0].attachments[0].skinPlaceholder && loaded.bones[hat].skinRequired);
+    sk.swapSlots(0, 1);
+    CHECK(sk.skins[0].attachments[0].slot == 1);
+    sk.removeAttachment(1, 0);  // removing the placeholder drops its skin entries
+    CHECK(sk.skins[0].attachments.empty() && sk.skins[1].attachments.empty());
+    sk.removeConstraint(0);
+    CHECK(sk.skins[1].constraints.empty());
+    sk.removeBone(hat);
+    CHECK(sk.skins[1].bones.empty());
+}
+
 static void testJsonRoundTrip() {
     Skeleton sk = makeMeshRig();
     Slot& s = sk.slots[0];
@@ -811,6 +893,7 @@ int main() {
     testConstraintBookkeeping();
     testCopyPaste();
     testMirrorWeights();
+    testSkins();
     testJsonRoundTrip();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

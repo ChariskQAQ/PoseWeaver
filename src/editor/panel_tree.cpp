@@ -295,11 +295,17 @@ void Editor::drawTree() {
                         if (visCell("v", active, active ? "隐藏该附件" : "显示该附件（Animate 模式下会打关键帧）"))
                             setSlotAttachment(s, active ? -1 : a);
                         bool selected = sel_.kind == Selection::Attachment && sel_.slot == s && sel_.attachment == a;
-                        Icon icon = att.type == AttachmentType::Mesh ? Icon::Mesh : att.type == AttachmentType::Clipping ? Icon::Clipping
-                                    : att.type == AttachmentType::BoundingBox ? Icon::BoundingBox
-                                    : att.type == AttachmentType::Path        ? Icon::PathC
-                                                                              : Icon::Region;
-                        RowResult r = treeRow("att", icon, att.name,
+                        // Placeholders show what the active skins put there.
+                        const Attachment* shown = att.skinPlaceholder ? sk_.resolve(activeSkins_, s, a) : &att;
+                        Icon icon = att.skinPlaceholder && !shown       ? Icon::Skin
+                                    : shown->type == AttachmentType::Mesh ? Icon::Mesh
+                                    : shown->type == AttachmentType::Clipping ? Icon::Clipping
+                                    : shown->type == AttachmentType::BoundingBox ? Icon::BoundingBox
+                                    : shown->type == AttachmentType::Path        ? Icon::PathC
+                                                                                 : Icon::Region;
+                        std::string label = att.name;
+                        if (att.skinPlaceholder) label += shown ? "  [皮肤: " + shown->name + "]" : "  [皮肤: 无]";
+                        RowResult r = treeRow("att", icon, label,
                                               selected, true, false, active ? 0 : IM_COL32(150, 150, 150, 255));
                         scrollIfSelected(selected);
                         if (r.clicked) selectAttachment(s, a);
@@ -373,6 +379,36 @@ void Editor::drawTree() {
             setDrawOrderKey(*an, time_, order);
             updatePose();
         }
+    }
+
+    // ---- skins ----
+    ImGui::TableNextRow();
+    RowResult skins = treeRow("skins", Icon::Skin, "皮肤", false, sk_.skins.empty(), false);
+    if (skins.doubleClicked && setup) selectSkin(createSkin("skin"));
+    if (skins.rightClicked) ImGui::OpenPopup("skinctx");
+    if (ImGui::BeginPopup("skinctx")) {
+        if (ImGui::MenuItem("新建皮肤", nullptr, false, setup)) selectSkin(createSkin("skin"));
+        ImGui::EndPopup();
+    }
+    if (skins.open) {
+        for (int i = 0; i < (int)sk_.skins.size(); ++i) {
+            ImGui::PushID(17000 + i);
+            ImGui::TableNextRow();
+            auto pos = std::find(activeSkins_.begin(), activeSkins_.end(), i);
+            bool active = pos != activeSkins_.end();
+            if (visCell("v", active, "激活/取消这个皮肤（可同时激活多个，后激活的优先）")) toggleSkin(i);
+            bool selected = sel_.kind == Selection::Skin && sel_.index == i;
+            std::string label = sk_.skins[i].name;
+            if (active && activeSkins_.size() > 1) label += "  #" + std::to_string(pos - activeSkins_.begin() + 1);
+            RowResult r = treeRow("sk", Icon::Skin, label, selected, true, false, active ? 0 : IM_COL32(160, 160, 160, 255));
+            if (r.clicked) selectSkin(i);
+            if (r.doubleClicked) {
+                activeSkins_ = {i};
+                updatePose();
+            }
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
     }
 
     // ---- constraints ----

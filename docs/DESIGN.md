@@ -39,6 +39,9 @@ Skeleton
                  Clipping / BoundingBox { vertices[] 或 weights[][]（多边形）, Clipping 另有 endSlot }
   images[]     : 相对工程文件的路径
   events[]     : name, int, float, string, audio（事件定义，关键帧可覆盖数值）
+  skins[]      : name, attachments[] {slot, placeholder 名, attachment}, bones[], constraints[]
+                 插槽里 skinPlaceholder=true 的附件只是占位，显示时按名字从激活的皮肤取实际附件
+                 （多个激活皮肤：后激活的优先）；bone/constraint.skinRequired 时需被激活皮肤列出才生效
   constraints[]: type(ik|transform|path|physics), bones[], target（骨骼；路径约束为插槽）,
                  values[6]（可打关键帧的混合值等）, 各类型的参数；数组顺序 = 生效顺序
   animations[] : name, duration,

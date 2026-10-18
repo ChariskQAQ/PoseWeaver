@@ -242,8 +242,9 @@ static void applyPath(const Skeleton& sk, Pose& pose, const Constraint& c, const
     if (c.target < 0 || c.target >= (int)sk.slots.size()) return;
     const Slot& slot = sk.slots[c.target];
     int ai = c.target < (int)pose.slotAttachment.size() ? pose.slotAttachment[c.target] : slot.activeAttachment;
-    if (ai < 0 || ai >= (int)slot.attachments.size() || slot.attachments[ai].type != AttachmentType::Path) return;
-    const Attachment& att = slot.attachments[ai];
+    const Attachment* resolved = poseAttachment(sk, pose, c.target);
+    if (!resolved || resolved->type != AttachmentType::Path) return;
+    const Attachment& att = *resolved;
     PathCurve path = buildPathCurve(computeVertices(sk, pose, slot, att, findDeform(pose, c.target, ai)), att.closed);
     if (path.segments.empty()) return;
     const float position = v[0], spacing = v[1], mr = v[2], mx = v[3], my = v[4];
@@ -274,6 +275,7 @@ static void applyPath(const Skeleton& sk, Pose& pose, const Constraint& c, const
 void applyConstraints(const Skeleton& sk, Pose& pose) {
     for (size_t i = 0; i < sk.constraints.size(); ++i) {
         const Constraint& c = sk.constraints[i];
+        if (i < pose.constraintActive.size() && !pose.constraintActive[i]) continue;
         const ConstraintValues& v = i < pose.constraints.size() ? pose.constraints[i] : c.values;
         switch (c.type) {
         case ConstraintType::Ik: applyIk(sk, pose, c, v); break;
@@ -292,6 +294,7 @@ void applyPhysics(const Skeleton& sk, Pose& pose, PhysicsState& state, float dt)
     for (size_t i = 0; i < sk.constraints.size(); ++i) {
         const Constraint& c = sk.constraints[i];
         if (c.type != ConstraintType::Physics || c.bones.empty()) continue;
+        if (i < pose.constraintActive.size() && !pose.constraintActive[i]) continue;
         int b = c.bones[0];
         if (b < 0 || b >= (int)sk.bones.size()) continue;
         const ConstraintValues& v = i < pose.constraints.size() ? pose.constraints[i] : c.values;

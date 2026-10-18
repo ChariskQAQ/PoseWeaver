@@ -16,7 +16,8 @@ namespace rig {
 //   2  shear, Bezier curves, slot colour keys, draw order keys, events
 //   3  mesh hull, clipping / bounding box attachments, deform keys
 //   4  constraints (IK, transform, path, physics), path attachments, constraint keys
-static constexpr int kFormatVersion = 4;
+//   5  skins (placeholder attachments, skin entries, skin bones / constraints)
+static constexpr int kFormatVersion = 5;
 
 static const char* constraintTypeName(ConstraintType t) {
     switch (t) {
@@ -122,6 +123,74 @@ static std::vector<Vec2Key> vec2KeysFrom(const json& j, const char* name) {
     return keys;
 }
 
+static json attachmentJson(const Attachment& a) {
+    json ja{{"name", a.name}, {"image", a.image}, {"type", typeName(a.type)}};
+    if (a.skinPlaceholder) {
+        ja["placeholder"] = true;
+        return ja;
+    }
+    if (a.type == AttachmentType::Region) {
+        ja["transform"] = transformJson(a.transform);
+        return ja;
+    }
+    if (a.type == AttachmentType::Mesh) {
+        ja["uvs"] = vecList(a.uvs);
+        ja["triangles"] = a.triangles;
+        if (a.hullLength > 0) ja["hull"] = a.hullLength;
+    }
+    if (a.type == AttachmentType::Clipping) ja["end"] = a.endSlot;
+    if (a.type == AttachmentType::Path) ja["closed"] = a.closed;
+    if (a.isWeighted()) {
+        json ws = json::array();
+        for (auto& list : a.weights) {
+            json jl = json::array();
+            for (auto& w : list) jl.push_back({w.bone, w.local.x, w.local.y, w.weight});
+            ws.push_back(jl);
+        }
+        ja["weights"] = ws;
+    } else {
+        ja["vertices"] = vecList(a.vertices);
+    }
+    return ja;
+}
+
+static Attachment attachmentFrom(const json& ja) {
+    Attachment a;
+    a.name = ja.at("name").get<std::string>();
+    a.image = ja.value("image", -1);
+    a.type = typeFrom(ja.value("type", std::string("region")));
+    a.skinPlaceholder = ja.value("placeholder", false);
+    if (a.skinPlaceholder) return a;
+    if (a.type == AttachmentType::Region) {
+        if (ja.contains("transform")) a.transform = transformFrom(ja["transform"]);
+        return a;
+    }
+    if (a.type == AttachmentType::Mesh) {
+        a.uvs = vecListFrom(ja.at("uvs"));
+        a.triangles = ja.at("triangles").get<std::vector<int>>();
+        a.hullLength = ja.value("hull", 0);
+    }
+    a.endSlot = ja.value("end", -1);
+    a.closed = ja.value("closed", false);
+    if (ja.contains("weights")) {
+        for (auto& jl : ja["weights"]) {
+            std::vector<VertexWeight> list;
+            for (auto& jw : jl) {
+                VertexWeight w;
+                w.bone = jw[0].get<int>();
+                w.local = {jw[1].get<float>(), jw[2].get<float>()};
+                w.weight = jw[3].get<float>();
+                list.push_back(w);
+            }
+            a.weights.push_back(list);
+        }
+    } else {
+        a.vertices = vecListFrom(ja.at("vertices"));
+    }
+    if (a.isPolygon()) a.hullLength = (int)a.vertexCount();
+    return a;
+}
+
 std::string toJson(const Skeleton& sk, int indent) {
     json root;
     root["format"] = "rig";
@@ -137,6 +206,7 @@ std::string toJson(const Skeleton& sk, int indent) {
         jb["name"] = b.name;
         jb["parent"] = b.parent;
         jb["length"] = b.length;
+        if (b.skinRequired) jb["skin"] = true;
         bones.push_back(jb);
     }
     root["bones"] = bones;
@@ -145,32 +215,7 @@ std::string toJson(const Skeleton& sk, int indent) {
     for (auto& s : sk.slots) {
         json js{{"name", s.name}, {"bone", s.bone}, {"active", s.activeAttachment}, {"color", colorJson(s.color)}};
         json atts = json::array();
-        for (auto& a : s.attachments) {
-            json ja{{"name", a.name}, {"image", a.image}, {"type", typeName(a.type)}};
-            if (a.type == AttachmentType::Region) {
-                ja["transform"] = transformJson(a.transform);
-            } else {
-                if (a.type == AttachmentType::Mesh) {
-                    ja["uvs"] = vecList(a.uvs);
-                    ja["triangles"] = a.triangles;
-                    if (a.hullLength > 0) ja["hull"] = a.hullLength;
-                }
-                if (a.type == AttachmentType::Clipping) ja["end"] = a.endSlot;
-                if (a.type == AttachmentType::Path) ja["closed"] = a.closed;
-                if (a.isWeighted()) {
-                    json ws = json::array();
-                    for (auto& list : a.weights) {
-                        json jl = json::array();
-                        for (auto& w : list) jl.push_back({w.bone, w.local.x, w.local.y, w.weight});
-                        ws.push_back(jl);
-                    }
-                    ja["weights"] = ws;
-                } else {
-                    ja["vertices"] = vecList(a.vertices);
-                }
-            }
-            atts.push_back(ja);
-        }
+        for (auto& a : s.attachments) atts.push_back(attachmentJson(a));
         js["attachments"] = atts;
         slots.push_back(js);
     }
@@ -192,6 +237,7 @@ std::string toJson(const Skeleton& sk, int indent) {
     for (auto& c : sk.constraints) {
         json jc{{"name", c.name}, {"type", constraintTypeName(c.type)}, {"bones", c.bones}, {"target", c.target},
                 {"values", valuesJson(c.values)}};
+        if (c.skinRequired) jc["skin"] = true;
         switch (c.type) {
         case ConstraintType::Ik:
             jc["compress"] = c.compress;
@@ -217,6 +263,15 @@ std::string toJson(const Skeleton& sk, int indent) {
         constraints.push_back(jc);
     }
     root["constraints"] = constraints;
+
+    json skins = json::array();
+    for (auto& skin : sk.skins) {
+        json entries = json::array();
+        for (auto& e : skin.attachments)
+            entries.push_back({{"slot", e.slot}, {"placeholder", e.placeholder}, {"attachment", attachmentJson(e.attachment)}});
+        skins.push_back({{"name", skin.name}, {"bones", skin.bones}, {"constraints", skin.constraints}, {"attachments", entries}});
+    }
+    root["skins"] = skins;
 
     json anims = json::array();
     for (auto& an : sk.animations) {
@@ -297,7 +352,7 @@ static bool validate(const Skeleton& sk, std::string* error) {
         if (s.activeAttachment >= (int)s.attachments.size()) return fail("slot " + s.name + ": invalid active attachment");
         for (auto& a : s.attachments) {
             if (a.image < -1 || a.image >= ni) return fail("attachment " + a.name + ": invalid image");
-            if (a.type == AttachmentType::Region) continue;
+            if (a.type == AttachmentType::Region || a.skinPlaceholder) continue;
             size_t nv = a.vertexCount();
             if (a.type == AttachmentType::Mesh && a.uvs.size() != nv) return fail("mesh " + a.name + ": vertex count mismatch");
             if (a.hullLength < 0 || a.hullLength > (int)nv) return fail("mesh " + a.name + ": invalid hull");
@@ -316,6 +371,7 @@ static bool validate(const Skeleton& sk, std::string* error) {
             if (si < 0 || si >= ns) return fail("animation " + an.name + ": invalid slot");
             for (auto& [ai, keys] : tl.deform) {
                 if (ai < 0 || ai >= (int)sk.slots[si].attachments.size()) return fail("animation " + an.name + ": invalid deform attachment");
+                if (sk.slots[si].attachments[ai].skinPlaceholder) continue;  // skin attachments may differ
                 size_t nv = sk.slots[si].attachments[ai].vertexCount();
                 for (auto& k : keys)
                     if (k.value.size() != nv) return fail("animation " + an.name + ": deform key vertex count mismatch");
@@ -333,6 +389,16 @@ static bool validate(const Skeleton& sk, std::string* error) {
             if (k.event < 0 || k.event >= ne) return fail("animation " + an.name + ": invalid event");
         for (auto& [ci, keys] : an.constraints)
             if (ci < 0 || ci >= (int)sk.constraints.size()) return fail("animation " + an.name + ": invalid constraint");
+    }
+    for (auto& skin : sk.skins) {
+        for (int b : skin.bones)
+            if (b < 0 || b >= nb) return fail("skin " + skin.name + ": invalid bone");
+        for (int c : skin.constraints)
+            if (c < 0 || c >= (int)sk.constraints.size()) return fail("skin " + skin.name + ": invalid constraint");
+        for (auto& e : skin.attachments) {
+            if (e.slot < 0 || e.slot >= ns) return fail("skin " + skin.name + ": invalid slot");
+            if (e.attachment.image < -1 || e.attachment.image >= ni) return fail("skin " + skin.name + ": invalid image");
+        }
     }
     for (auto& c : sk.constraints) {
         for (int b : c.bones)
@@ -370,6 +436,7 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
             b.parent = j.value("parent", -1);
             b.length = j.value("length", 0.0f);
             b.setup = transformFrom(j);
+            b.skinRequired = j.value("skin", false);
             sk.bones.push_back(b);
         }
         for (auto& j : root.at("slots")) {
@@ -379,37 +446,7 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
             s.activeAttachment = j.value("active", -1);
             if (j.contains("color")) s.color = colorFrom(j["color"]);
             for (auto& ja : j.at("attachments")) {
-                Attachment a;
-                a.name = ja.at("name").get<std::string>();
-                a.image = ja.value("image", -1);
-                a.type = typeFrom(ja.value("type", std::string("region")));
-                if (a.type != AttachmentType::Region) {
-                    if (a.type == AttachmentType::Mesh) {
-                        a.uvs = vecListFrom(ja.at("uvs"));
-                        a.triangles = ja.at("triangles").get<std::vector<int>>();
-                        a.hullLength = ja.value("hull", 0);
-                    }
-                    a.endSlot = ja.value("end", -1);
-                    a.closed = ja.value("closed", false);
-                    if (ja.contains("weights")) {
-                        for (auto& jl : ja["weights"]) {
-                            std::vector<VertexWeight> list;
-                            for (auto& jw : jl) {
-                                VertexWeight w;
-                                w.bone = jw[0].get<int>();
-                                w.local = {jw[1].get<float>(), jw[2].get<float>()};
-                                w.weight = jw[3].get<float>();
-                                list.push_back(w);
-                            }
-                            a.weights.push_back(list);
-                        }
-                    } else {
-                        a.vertices = vecListFrom(ja.at("vertices"));
-                    }
-                    if (a.isPolygon()) a.hullLength = (int)a.vertexCount();
-                } else {
-                    if (ja.contains("transform")) a.transform = transformFrom(ja["transform"]);
-                }
+                Attachment a = attachmentFrom(ja);
                 s.attachments.push_back(a);
             }
             sk.slots.push_back(s);
@@ -435,6 +472,7 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                 c.bones = jc.at("bones").get<std::vector<int>>();
                 c.target = jc.value("target", -1);
                 c.values = valuesFrom(jc.value("values", json::array()), defaultConstraintValues(c.type));
+                c.skinRequired = jc.value("skin", false);
                 c.compress = jc.value("compress", false);
                 c.stretch = jc.value("stretch", false);
                 c.uniform = jc.value("uniform", false);
@@ -467,6 +505,22 @@ bool fromJson(const std::string& text, Skeleton& out, std::string* error) {
                     c.limit = ph[4];
                 }
                 sk.constraints.push_back(c);
+            }
+        }
+        if (root.contains("skins")) {
+            for (auto& js : root["skins"]) {
+                Skin skin;
+                skin.name = js.at("name").get<std::string>();
+                skin.bones = js.value("bones", std::vector<int>{});
+                skin.constraints = js.value("constraints", std::vector<int>{});
+                for (auto& je : js.value("attachments", json::array())) {
+                    SkinEntry e;
+                    e.slot = je.at("slot").get<int>();
+                    e.placeholder = je.at("placeholder").get<std::string>();
+                    e.attachment = attachmentFrom(je.at("attachment"));
+                    skin.attachments.push_back(std::move(e));
+                }
+                sk.skins.push_back(std::move(skin));
             }
         }
         for (auto& ja : root.at("animations")) {

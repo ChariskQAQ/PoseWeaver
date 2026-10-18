@@ -54,7 +54,7 @@ static Options parseArgs(int argc, char** argv) {
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
         if (a == "--demo") o.demoImage = next();
         else if (a == "--time") o.demoTime = std::strtof(next().c_str(), nullptr);
-        else if (a == "--weights" || a == "--mesh" || a == "--clip" || a == "--ik" || a == "--path" || a == "--ghost" || a == "--bake") o.scenario = a.substr(2);
+        else if (a == "--weights" || a == "--mesh" || a == "--clip" || a == "--ik" || a == "--path" || a == "--ghost" || a == "--bake" || a == "--skin") o.scenario = a.substr(2);
         else if (a == "--graph") o.demoGraph = true;
         else if (a == "--screenshot") o.screenshot = next();
         else o.open = a;

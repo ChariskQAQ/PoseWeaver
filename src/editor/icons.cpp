@@ -31,6 +31,7 @@ ImU32 iconColor(Icon icon) {
     case Icon::TransformC: return IM_COL32(240, 200, 80, 255);
     case Icon::PathC: return IM_COL32(255, 150, 60, 255);
     case Icon::Physics: return IM_COL32(90, 210, 240, 255);
+    case Icon::Skin: return IM_COL32(255, 160, 110, 255);
     case Icon::Slot: return IM_COL32(120, 200, 255, 255);
     case Icon::Region: return IM_COL32(120, 200, 140, 255);
     case Icon::Mesh: return IM_COL32(110, 200, 230, 255);
@@ -213,6 +214,15 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float size, ImU32 col) {
         dl->AddPolyline(pts, n + 1, col, 0, t * 1.3f);
         dl->AddCircleFilled(pts[0], s * 0.16f, col);
         dl->AddCircleFilled(pts[n], s * 0.16f, col);
+        break;
+    }
+    case Icon::Skin: {  // a little shirt
+        ImVec2 pts[8] = {P(c, s, -0.35f, -0.8f), P(c, s, -0.9f, -0.45f), P(c, s, -0.65f, -0.05f), P(c, s, -0.45f, -0.2f),
+                         P(c, s, -0.45f, 0.85f), P(c, s, 0.45f, 0.85f), P(c, s, 0.45f, -0.2f), P(c, s, 0.65f, -0.05f)};
+        dl->AddConvexPolyFilled(pts + 3, 4, col);
+        dl->AddTriangleFilled(pts[0], pts[1], pts[2], col);
+        dl->AddTriangleFilled(P(c, s, 0.35f, -0.8f), pts[7], P(c, s, 0.9f, -0.45f), col);
+        dl->AddRectFilled(P(c, s, -0.45f, -0.8f), P(c, s, 0.45f, -0.1f), col);
         break;
     }
     case Icon::Ghost:

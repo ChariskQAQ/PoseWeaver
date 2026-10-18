@@ -203,7 +203,16 @@ void Editor::selectConstraint(int c) {
     sel_.index = c;
 }
 
+void Editor::selectSkin(int skin) {
+    sel_.clear();
+    if (skin < 0 || skin >= (int)sk_.skins.size()) return;
+    sel_.kind = Selection::Skin;
+    sel_.index = skin;
+}
+
 void Editor::validateSelection() {
+    activeSkins_.erase(std::remove_if(activeSkins_.begin(), activeSkins_.end(), [&](int s) { return s >= (int)sk_.skins.size(); }),
+                       activeSkins_.end());
     if (sel_.bone >= (int)sk_.bones.size()) sel_.bone = -1;
     if (sel_.slot >= (int)sk_.slots.size()) sel_.slot = -1;
     if (sel_.slot >= 0 && sel_.attachment >= (int)sk_.slots[sel_.slot].attachments.size()) sel_.attachment = -1;
@@ -215,6 +224,7 @@ void Editor::validateSelection() {
     case Selection::Image: if (sel_.index >= (int)sk_.images.size()) sel_.kind = Selection::None; break;
     case Selection::Event: if (sel_.index >= (int)sk_.events.size()) sel_.kind = Selection::None; break;
     case Selection::Constraint: if (sel_.index >= (int)sk_.constraints.size()) sel_.kind = Selection::None; break;
+    case Selection::Skin: if (sel_.index >= (int)sk_.skins.size()) sel_.kind = Selection::None; break;
     default: break;
     }
     Attachment* a = selectedAttachment();
@@ -236,14 +246,15 @@ Attachment* Editor::selectedAttachment() {
     int a = s.activeAttachment;
     if (mode_ == Mode::Animate && sel_.slot < (int)pose_.slotAttachment.size()) a = pose_.slotAttachment[sel_.slot];
     if (a < 0 || a >= (int)s.attachments.size()) return nullptr;
-    return &s.attachments[a];
+    return sk_.resolve(activeSkins_, sel_.slot, a);
 }
 
 Attachment* Editor::transformTargetAttachment() {
     if (mode_ != Mode::Setup) return nullptr;
     if (sel_.kind != Selection::Slot && sel_.kind != Selection::Attachment) return nullptr;
     Slot& s = sk_.slots[sel_.slot];
-    Attachment* a = sel_.kind == Selection::Attachment ? &s.attachments[sel_.attachment] : selectedAttachment();
+    (void)s;
+    Attachment* a = sel_.kind == Selection::Attachment ? sk_.resolve(activeSkins_, sel_.slot, sel_.attachment) : selectedAttachment();
     return a && a->type == AttachmentType::Region ? a : nullptr;
 }
 
@@ -251,11 +262,12 @@ Attachment* Editor::transformTargetAttachment() {
 
 void Editor::updatePose() {
     if (mode_ == Mode::Setup) {
-        pose_ = makeSetupPose(sk_);
+        pose_ = makeSetupPose(sk_, activeSkins_);
         if (physicsOn_) applyPhysics(sk_, pose_, physics_, physicsDt_);
         return;
     }
     resetToSetup(sk_, pose_);
+    pose_.skins = activeSkins_;
     if (Animation* an = currentAnimation()) applyAnimation(sk_, *an, time_, pose_);
     for (auto& [b, p] : pending_) {
         if (b >= (int)pose_.local.size()) continue;
@@ -532,6 +544,7 @@ void Editor::newProject() {
     mode_ = Mode::Setup;
     pending_.clear();
     physics_.reset();
+    activeSkins_.clear();
     hiddenBones_.clear();
     hiddenSlots_.clear();
     collapsedBones_.clear();
@@ -582,6 +595,7 @@ bool Editor::openProject(const std::string& path) {
     reloadTextures();
     selectBone(sk_.bones.empty() ? -1 : 0);
     anim_ = sk_.animations.empty() ? -1 : 0;
+    if (!sk_.skins.empty()) activeSkins_ = {0};
     dirty_ = false;
     frameAllIn_ = 5;
     setStatus("已打开 " + fs::u8path(path).filename().u8string());
@@ -716,6 +730,13 @@ void Editor::renameSelection(const std::string& name) {
         break;
     case Selection::Attachment:
         checkpoint();
+        if (sk_.slots[sel_.slot].attachments[sel_.attachment].skinPlaceholder) {
+            // Skin entries are linked to the placeholder by name.
+            const std::string old = sk_.slots[sel_.slot].attachments[sel_.attachment].name;
+            for (auto& skin : sk_.skins)
+                for (auto& e : skin.attachments)
+                    if (e.slot == sel_.slot && e.placeholder == old) e.placeholder = name;
+        }
         sk_.slots[sel_.slot].attachments[sel_.attachment].name = name;
         break;
     case Selection::Animation:
@@ -726,6 +747,11 @@ void Editor::renameSelection(const std::string& name) {
         if (name == sk_.events[sel_.index].name) return;
         checkpoint();
         sk_.events[sel_.index].name = sk_.uniqueEventName(name);
+        break;
+    case Selection::Skin:
+        if (name == sk_.skins[sel_.index].name) return;
+        checkpoint();
+        sk_.skins[sel_.index].name = sk_.uniqueSkinName(name);
         break;
     case Selection::Constraint:
         if (name == sk_.constraints[sel_.index].name) return;
@@ -771,6 +797,18 @@ void Editor::deleteSelection() {
         sel_.clear();
         setStatus("已删除事件");
         return;
+    case Selection::Skin: {
+        checkpoint();
+        int skin = sel_.index;
+        sk_.removeSkin(skin);
+        std::vector<int> kept;
+        for (int s : activeSkins_)
+            if (s != skin) kept.push_back(s > skin ? s - 1 : s);
+        activeSkins_ = kept;
+        sel_.clear();
+        setStatus("已删除皮肤");
+        return;
+    }
     case Selection::Constraint:
         checkpoint();
         sk_.removeConstraint(sel_.index);
@@ -819,6 +857,48 @@ void Editor::deleteSelection() {
     default:
         return;
     }
+}
+
+// ---------------------------------------------------------------- skins
+
+Attachment* Editor::editableAttachment(int slot, int attachment) { return sk_.resolve(activeSkins_, slot, attachment); }
+
+void Editor::toggleSkin(int skin) {
+    auto it = std::find(activeSkins_.begin(), activeSkins_.end(), skin);
+    if (it != activeSkins_.end()) activeSkins_.erase(it);
+    else activeSkins_.push_back(skin);
+    physics_.reset();
+    validateSelection();
+    updatePose();
+}
+
+int Editor::createSkin(const std::string& name) {
+    checkpoint();
+    Skin skin;
+    skin.name = sk_.uniqueSkinName(name);
+    sk_.skins.push_back(skin);
+    int index = (int)sk_.skins.size() - 1;
+    activeSkins_ = {index};
+    updatePose();
+    return index;
+}
+
+void Editor::moveAttachmentToSkin(int s, int a, int skin) {
+    if (s < 0 || s >= (int)sk_.slots.size() || skin < 0 || skin >= (int)sk_.skins.size()) return;
+    Attachment& att = sk_.slots[s].attachments[a];
+    if (att.skinPlaceholder) return;
+    checkpoint();
+    Skin& target = sk_.skins[skin];
+    if (Attachment* existing = target.find(s, att.name)) *existing = att;
+    else target.attachments.push_back({s, att.name, att});
+    Attachment placeholder;
+    placeholder.name = att.name;
+    placeholder.type = att.type;
+    placeholder.skinPlaceholder = true;
+    att = placeholder;
+    if (std::find(activeSkins_.begin(), activeSkins_.end(), skin) == activeSkins_.end()) activeSkins_.push_back(skin);
+    updatePose();
+    setStatus("已移入皮肤 " + target.name + "：其他皮肤可以为这个占位提供自己的附件");
 }
 
 // ---------------------------------------------------------------- compensation
@@ -889,7 +969,7 @@ void Editor::bakePhysics(int only) {
     std::map<int, std::vector<Transform>> baked;  // bone -> applied local per frame
     for (int pass = loop_ ? 0 : 1; pass < 2; ++pass) {
         for (int f = 0; f <= frames; ++f) {
-            Pose p = makeAnimatedPose(sk_, an, f * step);
+            Pose p = makeAnimatedPose(sk_, an, f * step, activeSkins_);
             applyPhysics(sk_, p, state, f == 0 && pass == 0 ? 0.0f : step);
             if (pass == 1)
                 for (int c : cons) baked[sk_.constraints[c].bones[0]].push_back(p.applied[sk_.constraints[c].bones[0]]);
@@ -1153,7 +1233,12 @@ void Editor::meshDeleteSelectedVertices() {
 }
 
 bool Editor::autoMesh(int s, int a) {
-    Attachment& att = sk_.slots[s].attachments[a];
+    Attachment* target = editableAttachment(s, a);
+    if (!target) {
+        setStatus("皮肤占位没有被激活的皮肤填充");
+        return false;
+    }
+    Attachment& att = *target;
     if (att.image < 0 || att.image >= (int)textures_.size() || textures_[att.image].rgba.empty()) {
         setStatus("图片未加载，无法生成网格");
         return false;
@@ -1187,8 +1272,8 @@ void Editor::createPolygonAttachment(int s, AttachmentType type) {
     Pose setup = makeSetupPose(sk_);
     const Slot& src = sk_.slots[s];
     std::vector<Vec2> pts;
-    if (src.activeAttachment >= 0) {
-        std::vector<Vec2> world = computeVertices(sk_, setup, src, src.attachments[src.activeAttachment]);
+    if (const Attachment* shown = sk_.resolve(activeSkins_, s, src.activeAttachment)) {
+        std::vector<Vec2> world = computeVertices(sk_, setup, src, *shown);
         if (!world.empty()) {
             Vec2 lo = world[0], hi = world[0];
             for (Vec2 p : world) {
@@ -1364,6 +1449,12 @@ void Editor::drawStatusBar() {
             ImGui::Separator();
             ImGui::Text("骨骼 %d  插槽 %d  动画 %d", (int)sk_.bones.size(), (int)sk_.slots.size(),
                         (int)sk_.animations.size());
+            if (!sk_.skins.empty()) {
+                ImGui::Separator();
+                std::string names;
+                for (int k : activeSkins_) names += (names.empty() ? "" : " + ") + sk_.skins[k].name;
+                ImGui::Text("皮肤: %s", names.empty() ? "(无)" : names.c_str());
+            }
             if (!pending_.empty()) {
                 ImGui::Separator();
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(theme::kKeyChanged), "有未打帧的改动（K 打帧）");
@@ -1401,9 +1492,9 @@ void Editor::frameAll() {
         add(boneTip(sk_.bones[i], p.world[i]));
     }
     for (size_t s = 0; s < sk_.slots.size(); ++s) {
-        int a = s < p.slotAttachment.size() ? p.slotAttachment[s] : -1;
-        if (a < 0 || a >= (int)sk_.slots[s].attachments.size()) continue;
-        for (Vec2 v : computeVertices(sk_, p, sk_.slots[s], sk_.slots[s].attachments[a])) add(v);
+        const Attachment* att = poseAttachment(sk_, p, (int)s);
+        if (!att) continue;
+        for (Vec2 v : computeVertices(sk_, p, sk_.slots[s], *att)) add(v);
     }
     if (minX > maxX) return;
     float w = std::max(maxX - minX, 50.0f), h = std::max(maxY - minY, 50.0f);
@@ -1475,6 +1566,31 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
     undo_.clear();
     redo_.clear();
     dirty_ = false;
+    if (scenario == "skin") {
+        // Two skins for the arm: the original stripes and a recoloured variant.
+        std::string alt = (std::filesystem::u8path(imagePath).parent_path() / "arm_alt.png").u8string();
+        int blue = createSkin("stripes");
+        moveAttachmentToSkin(0, 0, blue);
+        int red = createSkin("plain");
+        Texture altTex;
+        std::string err;
+        if (loadTexture(alt, altTex, &err)) {
+            sk_.images.push_back({alt, altTex.width, altTex.height});
+            textures_.push_back(std::move(altTex));
+            Attachment copy = *sk_.skins[blue].find(0, "arm");
+            copy.name = "arm_plain";
+            copy.image = (int)sk_.images.size() - 1;
+            sk_.skins[red].attachments.push_back({0, "arm", copy});
+        }
+        activeSkins_ = {red};
+        undo_.clear();
+        dirty_ = false;
+        mode_ = Mode::Animate;
+        time_ = time;
+        selectAttachment(0, 0);
+        frameAllIn_ = 5;
+        return;
+    }
     if (scenario == "ghost") {
         mode_ = Mode::Animate;
         time_ = time;
