@@ -36,6 +36,17 @@ scripts\build.bat Release
 
 产物：`build\Release\RigEditor.exe`。脚本会顺带运行 `rigcore_tests`。
 
+## 打包发布
+
+```bat
+scripts\package.bat
+```
+
+生成 `dist\RigEditor-<版本>-win64\` 绿色版文件夹和同名 `.zip`（exe + samples + 说明 + 第三方许可）。
+exe 静态链接 C++ 运行库、带图标与版本信息、不弹控制台窗口，解压到任何位置都能直接运行；
+用户设置保存在 `%APPDATA%\RigEditor`。装有 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 时还会生成安装包
+`RigEditor-<版本>-setup.exe`（开始菜单、可选桌面图标、卸载）。版本号取自 `CMakeLists.txt` 的 `project(... VERSION ...)`。
+
 ## 运行
 
 ```bat

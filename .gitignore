@@ -3,3 +3,4 @@ build/
 out/
 *.user
 imgui.ini
+dist/

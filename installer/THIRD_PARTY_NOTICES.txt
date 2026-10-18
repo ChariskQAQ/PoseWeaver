@@ -1,0 +1,26 @@
+RigEditor includes the following third-party software, compiled into RigEditor.exe.
+
+Dear ImGui (v1.91.9b, docking branch)
+  https://github.com/ocornut/imgui
+  MIT License, Copyright (c) 2014-2025 Omar Cornut
+
+GLFW 3.4
+  https://www.glfw.org
+  zlib/libpng License, Copyright (c) 2002-2006 Marcus Geelnard, Copyright (c) 2006-2019 Camilla Löwy
+
+stb_image, stb_image_write
+  https://github.com/nothings/stb
+  Public domain (Unlicense) or MIT License, Sean Barrett
+
+JSON for Modern C++ (nlohmann/json 3.11.3)
+  https://github.com/nlohmann/json
+  MIT License, Copyright (c) 2013-2023 Niels Lohmann
+
+miniaudio 0.11.22
+  https://miniaud.io
+  Public domain (Unlicense) or MIT No Attribution, David Reid
+
+The full license texts are available at the project pages above.
+
+Fonts: RigEditor uses the fonts installed with Windows (Microsoft YaHei / SimHei); none are bundled.
+Video export uses an ffmpeg installed separately by the user; ffmpeg is not bundled.

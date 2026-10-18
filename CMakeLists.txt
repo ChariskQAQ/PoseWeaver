@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(RigEditor LANGUAGES C CXX)
+project(RigEditor VERSION 0.7.0 LANGUAGES C CXX)
+
+# Static C/C++ runtime: the packaged exe runs without the VC++ redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(USE_MSVC_RUNTIME_LIBRARY_DLL OFF CACHE BOOL "" FORCE)  # GLFW's own switch
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -101,16 +105,21 @@ add_executable(RigEditor
   src/editor/splash.cpp
   src/editor/panel_io.cpp)
 target_include_directories(RigEditor PRIVATE src ${stb_SOURCE_DIR} ${MINIAUDIO_DIR})
+target_compile_definitions(RigEditor PRIVATE RIGEDITOR_VERSION="${PROJECT_VERSION}")
 target_link_libraries(RigEditor PRIVATE rigcore imgui)
 if(WIN32)
   target_link_libraries(RigEditor PRIVATE comdlg32)
   target_compile_definitions(RigEditor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  configure_file(assets/app.rc.in ${CMAKE_BINARY_DIR}/app.rc @ONLY)
+  target_sources(RigEditor PRIVATE ${CMAKE_BINARY_DIR}/app.rc)
 endif()
 if(MSVC)
   # Third-party single-header implementation: keep its warnings out of the build log.
   set_source_files_properties(src/platform/audio.cpp PROPERTIES COMPILE_OPTIONS "/W0")
   target_compile_options(rigcore PRIVATE /W4 /utf-8)
   target_compile_options(RigEditor PRIVATE /W4 /utf-8)
+  # A GUI program (no console window) that still starts at main().
+  target_link_options(RigEditor PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
   set_property(TARGET RigEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 

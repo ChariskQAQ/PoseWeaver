@@ -1,3 +1,8 @@
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 #include "editor/editor.h"
 #include "editor/theme.h"
 
@@ -49,11 +54,45 @@ struct Options {
     std::vector<std::pair<std::string, std::string>> runs;  // --run <type> <path>: import/export, then exit
 };
 
-static Options parseArgs(int argc, char** argv) {
+// Command-line arguments as UTF-8 (on Windows argv is in the ANSI code page, which loses non-ASCII paths).
+static std::vector<std::string> utf8Args(int argc, char** argv) {
+#ifdef _WIN32
+    (void)argc;
+    (void)argv;
+    std::vector<std::string> out;
+    int n = 0;
+    LPWSTR* w = CommandLineToArgvW(GetCommandLineW(), &n);
+    for (int i = 0; w && i < n; ++i) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, nullptr, 0, nullptr, nullptr);
+        std::string s(len > 0 ? len - 1 : 0, ' ');
+        if (len > 1) WideCharToMultiByte(CP_UTF8, 0, w[i], -1, s.data(), len, nullptr, nullptr);
+        out.push_back(std::move(s));
+    }
+    if (w) LocalFree(w);
+    return out;
+#else
+    return std::vector<std::string>(argv, argv + argc);
+#endif
+}
+
+// The exe is a GUI program; when started from a console with no redirected output, print there.
+static void attachParentConsole() {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if ((out == nullptr || out == INVALID_HANDLE_VALUE) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+#endif
+}
+
+static Options parseArgs(const std::vector<std::string>& args) {
     Options o;
+    const int argc = (int)args.size();
     for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
+        std::string a = args[i];
+        auto next = [&]() { return i + 1 < argc ? args[++i] : std::string(); };
         if (a == "--demo") o.demoImage = next();
         else if (a == "--time") o.demoTime = std::strtof(next().c_str(), nullptr);
         else if (a == "--weights" || a == "--mesh" || a == "--clip" || a == "--ik" || a == "--path" || a == "--ghost" || a == "--bake" || a == "--skin" || a == "--graphcolor" || a == "--mix") o.scenario = a.substr(2);
@@ -70,7 +109,9 @@ static Options parseArgs(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    Options opt = parseArgs(argc, argv);
+    std::vector<std::string> args = utf8Args(argc, argv);
+    if (args.size() > 1) attachParentConsole();
+    Options opt = parseArgs(args);
     glfwSetErrorCallback(onError);
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);

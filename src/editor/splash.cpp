@@ -23,7 +23,11 @@ namespace fs = std::filesystem;
 using namespace rig;
 
 namespace {
-constexpr const char* kAppVersion = "0.7.0";
+#ifdef RIGEDITOR_VERSION
+constexpr const char* kAppVersion = RIGEDITOR_VERSION;
+#else
+constexpr const char* kAppVersion = "dev";
+#endif
 constexpr size_t kMaxRecent = 10;
 
 fs::path configDir() {
