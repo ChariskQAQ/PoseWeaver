@@ -1,5 +1,5 @@
 @echo off
-rem Configure and build RigEditor with MSVC + Ninja (from VS 2022 Build Tools).
+rem Configure and build Poseweaver with MSVC + Ninja (from VS 2022 Build Tools).
 rem Usage: scripts\build.bat [Debug|Release]
 setlocal
 set CONFIG=%1
@@ -17,4 +17,4 @@ cmake -S . -B build\%CONFIG% -G Ninja -DCMAKE_BUILD_TYPE=%CONFIG% || exit /b 1
 cmake --build build\%CONFIG% || exit /b 1
 ctest --test-dir build\%CONFIG% --output-on-failure || exit /b 1
 echo.
-echo Built build\%CONFIG%\RigEditor.exe
+echo Built build\%CONFIG%\Poseweaver.exe

@@ -1,5 +1,6 @@
 // Dopesheet: overview row → bone / slot rows → property rows, plus draw order and events.
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "core/audio_mix.h"
 #include "editor/channels.h"
@@ -102,23 +103,23 @@ void Editor::drawDopesheet() {
     {
         Animation* an = currentAnimation();
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
-        if (ImGui::BeginCombo("##anim", an ? an->name.c_str() : "(无动画)")) {
+        if (ImGui::BeginCombo("##anim", an ? an->name.c_str() : tr("(无动画)"))) {
             for (int i = 0; i < (int)sk_.animations.size(); ++i) {
                 ImGui::PushID(i);
                 if (ImGui::Selectable(sk_.animations[i].name.c_str(), i == anim_)) selectAnimation(i);
                 ImGui::PopID();
             }
             ImGui::Separator();
-            if (ImGui::Selectable("+ 新建动画")) selectAnimation(createAnimation());
+            if (ImGui::Selectable(tr("+ 新建动画"))) selectAnimation(createAnimation());
             ImGui::EndCombo();
         }
         ImGui::SameLine(0, 12);
 
         std::vector<float> times = an ? keyTimes(*an) : std::vector<float>{};
         float dur = an ? an->duration : 0.0f;
-        if (iconOnlyButton("first", Icon::First, false, "第一帧")) setTime(0);
+        if (iconOnlyButton("first", Icon::First, false, tr("第一帧"))) setTime(0);
         ImGui::SameLine(0, 2);
-        if (iconOnlyButton("prev", Icon::PrevKey, false, "上一个关键帧")) {
+        if (iconOnlyButton("prev", Icon::PrevKey, false, tr("上一个关键帧"))) {
             float t = 0;
             for (float k : times)
                 if (k < time_ - kKeyEpsilon) t = k;
@@ -126,19 +127,19 @@ void Editor::drawDopesheet() {
         }
         ImGui::SameLine(0, 2);
         bool back = playing_ && playDir_ < 0, fwd = playing_ && playDir_ > 0;
-        if (iconOnlyButton("pb", back ? Icon::Pause : Icon::PlayBack, back, "倒放")) {
+        if (iconOnlyButton("pb", back ? Icon::Pause : Icon::PlayBack, back, tr("倒放"))) {
             playing_ = !back;
             playDir_ = -1;
             if (playing_ && time_ <= 0) time_ = dur;
         }
         ImGui::SameLine(0, 2);
-        if (iconOnlyButton("pf", fwd ? Icon::Pause : Icon::Play, fwd, "播放 / 暂停 (空格)")) {
+        if (iconOnlyButton("pf", fwd ? Icon::Pause : Icon::Play, fwd, tr("播放 / 暂停 (空格)"))) {
             playing_ = !fwd;
             playDir_ = 1;
             if (playing_ && time_ >= dur) time_ = 0;
         }
         ImGui::SameLine(0, 2);
-        if (iconOnlyButton("next", Icon::NextKey, false, "下一个关键帧")) {
+        if (iconOnlyButton("next", Icon::NextKey, false, tr("下一个关键帧"))) {
             for (float k : times)
                 if (k > time_ + kKeyEpsilon) {
                     setTime(k);
@@ -146,19 +147,19 @@ void Editor::drawDopesheet() {
                 }
         }
         ImGui::SameLine(0, 2);
-        if (iconOnlyButton("last", Icon::Last, false, "最后一帧")) setTime(dur);
+        if (iconOnlyButton("last", Icon::Last, false, tr("最后一帧"))) setTime(dur);
         ImGui::SameLine(0, 6);
-        if (iconOnlyButton("loop", Icon::Loop, loop_, "循环播放")) loop_ = !loop_;
+        if (iconOnlyButton("loop", Icon::Loop, loop_, tr("循环播放"))) loop_ = !loop_;
         ImGui::SameLine(0, 12);
 
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("当前");
+        ImGui::TextDisabled(tr("当前"));
         ImGui::SameLine();
         int frame = (int)std::round(time_ * fps_);
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 3.5f);
         if (ImGui::DragInt("##frame", &frame, 0.2f, 0, (int)std::round(dur * fps_))) setTime(frame / fps_);
         ImGui::SameLine();
-        ImGui::TextDisabled("结束");
+        ImGui::TextDisabled(tr("结束"));
         ImGui::SameLine();
         int endFrame = (int)std::round(dur * fps_);
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 3.5f);
@@ -168,7 +169,7 @@ void Editor::drawDopesheet() {
         if (changed && an) an->duration = std::max(1, endFrame) / fps_;
         ImGui::EndDisabled();
         ImGui::SameLine(0, 12);
-        ImGui::TextDisabled("速度");
+        ImGui::TextDisabled(tr("速度"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4.5f);
         char speedLabel[16];
@@ -182,7 +183,7 @@ void Editor::drawDopesheet() {
             ImGui::EndCombo();
         }
         ImGui::SameLine(0, 12);
-        if (iconOnlyButton("lock", Icon::Lock, sheetLocked_, "锁定：不随选择改变显示的骨骼")) {
+        if (iconOnlyButton("lock", Icon::Lock, sheetLocked_, tr("锁定：不随选择改变显示的骨骼"))) {
             sheetLocked_ = !sheetLocked_;
             sheetLockedBones_.clear();
             if (sheetLocked_) {
@@ -192,27 +193,27 @@ void Editor::drawDopesheet() {
             }
         }
         ImGui::SameLine(0, 12);
-        if (iconOnlyButton("audio", Icon::Audio, audioOn_, audio_->deviceAvailable() ? "播放音频事件" : "没有可用的音频输出设备")) {
+        if (iconOnlyButton("audio", Icon::Audio, audioOn_, audio_->deviceAvailable() ? tr("播放音频事件") : tr("没有可用的音频输出设备"))) {
             audioOn_ = !audioOn_;
             if (!audioOn_) audio_->stopAll();
         }
         ImGui::SameLine(0, 2);
-        if (iconOnlyButton("ghost", Icon::Ghost, ghostOn_, "洋葱皮（右键设置）")) ghostOn_ = !ghostOn_;
+        if (iconOnlyButton("ghost", Icon::Ghost, ghostOn_, tr("洋葱皮（右键设置）"))) ghostOn_ = !ghostOn_;
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("ghostcfg");
         if (ImGui::BeginPopup("ghostcfg")) {
-            ImGui::TextDisabled("洋葱皮：前后帧半透明叠加");
+            ImGui::TextDisabled(tr("洋葱皮：前后帧半透明叠加"));
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
-            ImGui::SliderInt("之前", &ghostBefore_, 0, 8);
+            ImGui::SliderInt(tr("之前"), &ghostBefore_, 0, 8);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
-            ImGui::SliderInt("之后", &ghostAfter_, 0, 8);
+            ImGui::SliderInt(tr("之后"), &ghostAfter_, 0, 8);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
-            ImGui::SliderInt("间隔（帧）", &ghostStep_, 1, 30);
+            ImGui::SliderInt(tr("间隔（帧）"), &ghostStep_, 1, 30);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
-            ImGui::SliderFloat("不透明度", &ghostAlpha_, 0.05f, 1.0f, "%.2f");
+            ImGui::SliderFloat(tr("不透明度"), &ghostAlpha_, 0.05f, 1.0f, "%.2f");
             ImGui::EndPopup();
         }
         ImGui::SameLine(0, 2);
-        if (iconOnlyButton("zfit", Icon::ZoomFit, sheetPps_ == 0, "时间轴适配宽度")) {
+        if (iconOnlyButton("zfit", Icon::ZoomFit, sheetPps_ == 0, tr("时间轴适配宽度"))) {
             sheetPps_ = 0;
             sheetScroll_ = 0;
         }
@@ -220,7 +221,7 @@ void Editor::drawDopesheet() {
 
     Animation* an = currentAnimation();
     if (!an) {
-        ImGui::TextDisabled("没有动画。在树的“动画”节点上双击，或用左上角下拉框新建。");
+        ImGui::TextDisabled(tr("没有动画。在树的“动画”节点上双击，或用左上角下拉框新建。"));
         ImGui::End();
         return;
     }
@@ -665,24 +666,24 @@ void Editor::drawDopesheet() {
                 for (auto& tg : rowChannels(k.row)) copyKey(*an, sheetClip_, tg.index, tg.channel, tg.sub, k.time, k.time - t0);
             sheetClipLength_ = t1 - t0;
             hasSheetClip_ = true;
-            setStatus("已复制 " + std::to_string(sheetSel_.size()) + " 个关键帧");
+            setStatus(tr("已复制 ") + std::to_string(sheetSel_.size()) + tr(" 个关键帧"));
         }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && hasSheetClip_) {
             checkpoint();
             mergeAnimation(*an, sheetClip_, time_);
             an->duration = std::max(an->duration, time_ + sheetClipLength_);
-            setStatus("已粘贴到第 " + std::to_string((int)std::round(time_ * fps_)) + " 帧");
+            setStatus(tr("已粘贴到第 ") + std::to_string((int)std::round(time_ * fps_)) + tr(" 帧"));
         }
     }
 
     if (ImGui::BeginPopup("keymenu")) {
-        ImGui::TextDisabled("%d 个关键帧", (int)sheetSel_.size());
-        if (ImGui::MenuItem("删除", "Del")) {
+        ImGui::TextDisabled(tr("%d 个关键帧"), (int)sheetSel_.size());
+        if (ImGui::MenuItem(tr("删除"), "Del")) {
             checkpoint();
             for (auto& k : sheetSel_) deleteKeysAt(k.row, k.time);
             sheetSel_.clear();
         }
-        if (ImGui::MenuItem("复制", "Ctrl+C")) {
+        if (ImGui::MenuItem(tr("复制"), "Ctrl+C")) {
             float t0 = 1e9f, t1 = -1e9f;
             for (auto& k : sheetSel_) {
                 t0 = std::min(t0, k.time);
@@ -694,7 +695,7 @@ void Editor::drawDopesheet() {
             sheetClipLength_ = t1 - t0;
             hasSheetClip_ = true;
         }
-        if (ImGui::MenuItem("粘贴到当前帧", "Ctrl+V", false, hasSheetClip_)) {
+        if (ImGui::MenuItem(tr("粘贴到当前帧"), "Ctrl+V", false, hasSheetClip_)) {
             checkpoint();
             mergeAnimation(*an, sheetClip_, time_);
             an->duration = std::max(an->duration, time_ + sheetClipLength_);
@@ -710,12 +711,12 @@ void Editor::drawDopesheet() {
                     for (auto& tg : rowChannels(k.row))
                         if (channelHasCurve(tg.channel)) setKeyCurve(*an, tg.index, tg.channel, k.time, c, tg.sub);
             };
-            if (ImGui::MenuItem("曲线: 线性")) setCurve(CurveShape::linear());
-            if (ImGui::MenuItem("曲线: 阶梯")) setCurve(CurveShape::stepped());
-            if (ImGui::MenuItem("曲线: 缓入缓出")) setCurve(CurveShape::bezier(0.42f, 0, 0.58f, 1));
-            if (ImGui::MenuItem("曲线: 缓入")) setCurve(CurveShape::bezier(0.42f, 0, 1, 1));
-            if (ImGui::MenuItem("曲线: 缓出")) setCurve(CurveShape::bezier(0, 0, 0.58f, 1));
-            ImGui::TextDisabled("在 Graph 视图里可以拖动手柄自定义");
+            if (ImGui::MenuItem(tr("曲线: 线性"))) setCurve(CurveShape::linear());
+            if (ImGui::MenuItem(tr("曲线: 阶梯"))) setCurve(CurveShape::stepped());
+            if (ImGui::MenuItem(tr("曲线: 缓入缓出"))) setCurve(CurveShape::bezier(0.42f, 0, 0.58f, 1));
+            if (ImGui::MenuItem(tr("曲线: 缓入"))) setCurve(CurveShape::bezier(0.42f, 0, 1, 1));
+            if (ImGui::MenuItem(tr("曲线: 缓出"))) setCurve(CurveShape::bezier(0, 0, 0.58f, 1));
+            ImGui::TextDisabled(tr("在 Graph 视图里可以拖动手柄自定义"));
         }
         ImGui::EndPopup();
     }
@@ -771,6 +772,12 @@ void Editor::drawDopesheet() {
             ImU32 lc = (channelColor(r.channel) & 0x00FFFFFF) | 0xA0000000;
             float mid = y + rowH * 0.5f;
             auto draw = [&](auto& keys) {
+                using K = typename std::decay_t<decltype(keys)>::value_type;
+                if constexpr (std::is_same_v<K,Vec2Key> || std::is_same_v<K,ColorKey>) {
+                    constexpr unsigned mask = std::is_same_v<K,Vec2Key> ? 3 : 15;
+                    // Independent components have no single channel interpolation line; Graph shows each one.
+                    if (std::any_of(keys.begin(),keys.end(),[mask](const K& key) { return key.separatedCurves || key.componentMask != mask; })) return;
+                }
                 for (size_t k = 0; k + 1 < keys.size(); ++k) {
                     if (sameValue(keys[k].value, keys[k + 1].value)) continue;
                     float x0 = timeToX(keys[k].time), x1 = timeToX(keys[k + 1].time);
@@ -816,7 +823,7 @@ void Editor::drawDopesheet() {
                 if (k.event != r.index) continue;
                 float x0 = timeToX(k.time);
                 if (!peaks || peaks->empty()) {
-                    rdl->AddText(ImVec2(x0 + 6, ty), IM_COL32(240, 110, 110, 255), "无法读取音频");
+                    rdl->AddText(ImVec2(x0 + 6, ty), IM_COL32(240, 110, 110, 255), tr("无法读取音频"));
                     continue;
                 }
                 float x1 = timeToX(k.time + peaks->size() / 100.0f);

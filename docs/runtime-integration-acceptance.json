@@ -1,0 +1,36 @@
+{
+  "version": "1.1.1",
+  "date": "2026-10-28",
+  "ctest": {
+    "passed": 12,
+    "failed": 0
+  },
+  "godot": {
+    "editor": "4.7.2.stable.steam",
+    "template": "4.7.2.stable.windows_release_x86_64",
+    "tests": {
+      "first_import": "passed",
+      "packed_scene_dependencies": "passed",
+      "project_root_paths": "passed",
+      "headless_playback": "passed",
+      "standalone_release_player": "passed",
+      "opengl_render": "passed",
+      "normal_add_multiply_pixels": "passed",
+      "legacy_baked_frames": "passed"
+    },
+    "export_mode": "all_resources",
+    "evidence": "build/runtime-acceptance-f340026e29344c8081df5122df26d7cf",
+    "render_tolerance": 0.03,
+    "renderer": "OpenGL 3.3 / NVIDIA GeForce RTX 5070 Laptop GPU"
+  },
+  "unity": {
+    "version": "6000.3.24f1",
+    "runtime_assembly_compile": "passed",
+    "editor_assembly_compile": "passed",
+    "editor_import": "deferred_license_unavailable",
+    "render_and_player": "not_run",
+    "editor_exit_code": 198,
+    "user_decision": "defer Unity execution until licensed"
+  },
+  "runtime_dll_sha256": "caed6b65577233d9255ec164ee20b39c1c1c7738ec2853c4fab3967f4ae9eb40"
+}

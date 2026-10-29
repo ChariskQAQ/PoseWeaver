@@ -6,7 +6,7 @@ namespace rig {
 
 namespace {
 struct Maps {
-    std::vector<int> bone, slot, image, event, constraint;
+    std::vector<int> bone, slot, image, event, constraint, skin;
 };
 
 int map(const std::vector<int>& m, int i) { return i >= 0 && i < (int)m.size() ? m[i] : -1; }
@@ -16,6 +16,7 @@ void remapAttachment(Attachment& a, const Maps& m) {
     for (auto& list : a.weights)
         for (auto& w : list) w.bone = map(m.bone, w.bone);
     if (a.endSlot >= 0) a.endSlot = map(m.slot, a.endSlot);
+    if (a.linkedSkin>=0) a.linkedSkin=map(m.skin,a.linkedSkin);
 }
 
 Animation remapAnimation(const Animation& src, const Maps& m, int dstSlotCount, int srcSlotCount) {
@@ -23,7 +24,11 @@ Animation remapAnimation(const Animation& src, const Maps& m, int dstSlotCount, 
     out.name = src.name;
     out.duration = src.duration;
     for (auto& [b, tl] : src.bones) out.bones[map(m.bone, b)] = tl;
-    for (auto& [s, tl] : src.slots) out.slots[map(m.slot, s)] = tl;
+    for (auto& [s, tl] : src.slots) {
+        auto copy=tl;
+        for (auto& [a,keys] : copy.deform) for (auto& key : keys) if (key.skin>=0) key.skin=map(m.skin,key.skin);
+        out.slots[map(m.slot,s)]=std::move(copy);
+    }
     for (auto& [c, keys] : src.constraints) out.constraints[map(m.constraint, c)] = keys;
     for (EventKey k : src.events) {
         k.event = map(m.event, k.event);
@@ -44,8 +49,18 @@ Animation remapAnimation(const Animation& src, const Maps& m, int dstSlotCount, 
 } // namespace
 
 std::string mergeSkeleton(Skeleton& dst, const Skeleton& src) {
+    const bool keepEffects = !(src.effects == RenderEffects{}) && !(dst.effects == src.effects) &&
+        (!dst.slots.empty() || !(dst.effects == RenderEffects{}));
+    if (dst.slots.empty() && dst.effects == RenderEffects{}) dst.effects = src.effects;
     Maps m;
     int newImages = 0, sharedEvents = 0, mergedAnims = 0, mergedSkins = 0, renamed = 0;
+    for (const auto& skin : src.skins) {
+        int target=-1;
+        for (int i=0;i<(int)dst.skins.size();++i) if (dst.skins[i].name==skin.name) target=i;
+        if (target<0) { target=(int)dst.skins.size(); dst.skins.push_back(Skin{skin.name,{},{},{}}); }
+        else ++mergedSkins;
+        m.skin.push_back(target);
+    }
 
     for (const Image& im : src.images) {
         int found = -1;
@@ -104,16 +119,9 @@ std::string mergeSkeleton(Skeleton& dst, const Skeleton& src) {
         dst.constraints.push_back(nc);
     }
 
-    for (const Skin& skin : src.skins) {
-        Skin* target = nullptr;
-        for (auto& s : dst.skins)
-            if (s.name == skin.name) target = &s;
-        if (!target) {
-            dst.skins.push_back(Skin{skin.name, {}, {}, {}});
-            target = &dst.skins.back();
-        } else {
-            ++mergedSkins;
-        }
+    for (int skinIndex=0;skinIndex<(int)src.skins.size();++skinIndex) {
+        const Skin& skin=src.skins[skinIndex];
+        Skin* target=&dst.skins[m.skin[skinIndex]];
         for (int b : skin.bones) target->bones.push_back(map(m.bone, b));
         for (int c : skin.constraints) target->constraints.push_back(map(m.constraint, c));
         for (SkinEntry e : skin.attachments) {
@@ -151,6 +159,7 @@ std::string mergeSkeleton(Skeleton& dst, const Skeleton& src) {
     if (mergedSkins) report += "，合并同名皮肤 " + std::to_string(mergedSkins);
     if (sharedEvents) report += "，共用同名事件 " + std::to_string(sharedEvents);
     if (renamed) report += "，重命名 " + std::to_string(renamed) + " 项";
+    if (keepEffects) report += "；光源与像素设置保留当前工程的配置";
     return report;
 }
 

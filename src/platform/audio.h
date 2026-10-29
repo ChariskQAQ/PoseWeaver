@@ -8,7 +8,7 @@
 // are ignored when no device could be opened.
 class AudioPlayer {
 public:
-    AudioPlayer();
+    explicit AudioPlayer(bool playback = true);
     ~AudioPlayer();
     AudioPlayer(const AudioPlayer&) = delete;
     AudioPlayer& operator=(const AudioPlayer&) = delete;

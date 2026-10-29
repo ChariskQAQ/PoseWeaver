@@ -1,4 +1,6 @@
 #include "core/serialize.h"
+#include "core/diagnostics.h"
+#include "core/file_io.h"
 
 #include <json.hpp>
 
@@ -7,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <limits>
 
 using nlohmann::json;
 
@@ -18,7 +21,10 @@ namespace rig {
 //   3  mesh hull, clipping / bounding box attachments, deform keys
 //   4  constraints (IK, transform, path, physics), path attachments, constraint keys
 //   5  skins (placeholder attachments, skin entries, skin bones / constraints)
-static constexpr int kFormatVersion = 5;
+//   6  slot blend modes
+//   7  project light and pixel render effects
+//   8  component keys, linked meshes and skin-specific deformation keys
+static constexpr int kFormatVersion = 8;
 
 static const char* constraintTypeName(ConstraintType t) {
     switch (t) {
@@ -111,16 +117,45 @@ static std::vector<Vec2> vecListFrom(const json& a) {
     return v;
 }
 
+template<class K> static void componentFields(json& j,const K& key,unsigned fullMask) {
+    if (key.componentMask != fullMask) j["components"] = key.componentMask;
+    if (key.separatedCurves) {
+        j["componentCurves"] = json::array();
+        for (const auto& curve : key.componentCurves) j["componentCurves"].push_back(curveJson(curve));
+    }
+}
+template<class K> static void componentFieldsFrom(const json& j,K& key,unsigned fullMask) {
+    if (j.contains("components")) {
+        const auto& mask = j["components"];
+        if (!mask.is_number_integer() || mask < 1 || mask > fullMask) throw std::runtime_error("Invalid key component mask");
+        key.componentMask = mask.get<unsigned>();
+    }
+    if (j.contains("componentCurves")) {
+        const auto& curves = j["componentCurves"];
+        if (!curves.is_array() || curves.size() != key.componentCurves.size()) throw std::runtime_error("Invalid component curve count");
+        key.separatedCurves = true;
+        for (size_t c = 0; c < curves.size(); ++c) {
+            if (!(curves[c] == "linear" || curves[c] == "stepped" || (curves[c].is_array() && curves[c].size() == 4))) throw std::runtime_error("Invalid component curve");
+            key.componentCurves[c] = curveFrom(json{{"curve",curves[c]}});
+        }
+    }
+}
+
 static json vec2Keys(const std::vector<Vec2Key>& keys) {
     json a = json::array();
-    for (auto& k : keys) a.push_back({{"time", k.time}, {"x", k.value.x}, {"y", k.value.y}, {"curve", curveJson(k.curve)}});
+    for (auto& k : keys) {
+        json j{{"time", k.time}, {"x", k.value.x}, {"y", k.value.y}, {"curve", curveJson(k.curve)}};
+        componentFields(j,k,3); a.push_back(std::move(j));
+    }
     return a;
 }
 static std::vector<Vec2Key> vec2KeysFrom(const json& j, const char* name) {
     std::vector<Vec2Key> keys;
     if (!j.contains(name)) return keys;
-    for (auto& k : j[name])
-        keys.push_back({k.at("time").get<float>(), {k.at("x").get<float>(), k.at("y").get<float>()}, curveFrom(k)});
+    for (auto& k : j[name]) {
+        Vec2Key key{k.at("time").get<float>(), {k.at("x").get<float>(), k.at("y").get<float>()}, curveFrom(k)};
+        componentFieldsFrom(k,key,3); keys.push_back(std::move(key));
+    }
     return keys;
 }
 
@@ -128,6 +163,10 @@ static json attachmentJson(const Attachment& a) {
     json ja{{"name", a.name}, {"image", a.image}, {"type", typeName(a.type)}};
     if (a.skinPlaceholder) {
         ja["placeholder"] = true;
+        return ja;
+    }
+    if (a.linkedAttachment>=0) {
+        ja["linked"]={{"attachment",a.linkedAttachment},{"skin",a.linkedSkin},{"inheritDeform",a.inheritDeform}};
         return ja;
     }
     if (a.type == AttachmentType::Region) {
@@ -155,6 +194,12 @@ static json attachmentJson(const Attachment& a) {
     return ja;
 }
 
+static int deformSkinFrom(const json& key,const char* name,int fallback,int minimum) {
+    if (!key.contains(name)) return fallback;
+    const auto& value=key.at(name);
+    if (!value.is_number_integer() || value<minimum || value>std::numeric_limits<int>::max()) throw std::runtime_error("Invalid mesh or deformation index");
+    return value.get<int>();
+}
 static Attachment attachmentFrom(const json& ja) {
     Attachment a;
     a.name = ja.at("name").get<std::string>();
@@ -162,6 +207,12 @@ static Attachment attachmentFrom(const json& ja) {
     a.type = typeFrom(ja.value("type", std::string("region")));
     a.skinPlaceholder = ja.value("placeholder", false);
     if (a.skinPlaceholder) return a;
+    if (ja.contains("linked")) {
+        const auto& link=ja.at("linked");
+        a.linkedAttachment=deformSkinFrom(link,"attachment",-1,0); a.linkedSkin=deformSkinFrom(link,"skin",-1,-1);
+        if (a.linkedAttachment<0 || a.linkedSkin<-1 || a.type!=AttachmentType::Mesh) throw std::runtime_error("Invalid linked mesh reference");
+        a.inheritDeform=link.value("inheritDeform",true); return a;
+    }
     if (a.type == AttachmentType::Region) {
         if (ja.contains("transform")) a.transform = transformFrom(ja["transform"]);
         return a;
@@ -195,8 +246,24 @@ static Attachment attachmentFrom(const json& ja) {
 static json toDocument(const Skeleton& sk) {
     json root;
     root["format"] = "rig";
-    root["version"] = kFormatVersion;
+    root["version"] = std::any_of(sk.slots.begin(), sk.slots.end(), [](const Slot& slot) {
+        return slot.blend != BlendMode::Normal;
+    }) ? 6 : 5;
+    if (!(sk.effects == RenderEffects{})) {
+        root["version"] = 7;
+        const auto& l = sk.effects.light; const auto& p = sk.effects.pixel;
+        root["effects"] = {{"light", {{"enabled", l.enabled}, {"position", {l.position.x, l.position.y}}, {"color", l.color},
+            {"radius", l.radius}, {"intensity", l.intensity}, {"ambient", l.ambient}}},
+            {"pixel", {{"enabled", p.enabled}, {"size", p.size}, {"quantize", p.quantize}, {"dither", p.dither},
+            {"outline", p.outline}, {"outlineColor", p.outlineColor}, {"palette", p.palette}}}};
+    }
 
+    bool linked=false,skinDeform=false;
+    for (const auto& slot : sk.slots) for (const auto& a : slot.attachments) linked=linked || a.linkedAttachment>=0;
+    for (const auto& skin : sk.skins) for (const auto& entry : skin.attachments) linked=linked || entry.attachment.linkedAttachment>=0;
+    for (const auto& animation : sk.animations) for (const auto& [slot,timeline] : animation.slots)
+        for (const auto& [attachment,keys] : timeline.deform) for (const auto& key : keys) skinDeform=skinDeform || key.skin!=-2;
+    if (linked || skinDeform || usesComponentKeys(sk)) root["version"]=8;
     json images = json::array();
     for (auto& im : sk.images) images.push_back({{"path", im.path}, {"width", im.width}, {"height", im.height}});
     root["images"] = images;
@@ -215,6 +282,7 @@ static json toDocument(const Skeleton& sk) {
     json slots = json::array();
     for (auto& s : sk.slots) {
         json js{{"name", s.name}, {"bone", s.bone}, {"active", s.activeAttachment}, {"color", colorJson(s.color)}};
+        if (s.blend != BlendMode::Normal) js["blend"] = blendModeName(s.blend);
         json atts = json::array();
         for (auto& a : s.attachments) atts.push_back(attachmentJson(a));
         js["attachments"] = atts;
@@ -298,14 +366,21 @@ static json toDocument(const Skeleton& sk) {
                 json dj = json::array();
                 for (auto& [ai, dk] : tl.deform) {
                     json keysJ = json::array();
-                    for (auto& k : dk) keysJ.push_back({{"time", k.time}, {"offsets", vecList(k.value)}, {"curve", curveJson(k.curve)}});
+                    for (auto& k : dk) {
+                        json key{{"time",k.time},{"offsets",vecList(k.value)},{"curve",curveJson(k.curve)}};
+                        if (k.skin!=-2) key["skin"]=k.skin;
+                        keysJ.push_back(std::move(key));
+                    }
                     dj.push_back({{"attachment", ai}, {"keys", keysJ}});
                 }
                 jt["deform"] = dj;
             }
             if (!tl.color.empty()) {
                 json ck = json::array();
-                for (auto& k : tl.color) ck.push_back({{"time", k.time}, {"color", colorJson(k.value)}, {"curve", curveJson(k.curve)}});
+                for (auto& k : tl.color) {
+                    json key{{"time", k.time}, {"color", colorJson(k.value)}, {"curve", curveJson(k.curve)}};
+                    componentFields(key,k,15); ck.push_back(std::move(key));
+                }
                 jt["color"] = ck;
             }
             st.push_back(jt);
@@ -363,84 +438,9 @@ std::vector<uint8_t> toBinary(const Skeleton& sk, int decimals) {
     roundFloats(doc, decimals);
     std::vector<uint8_t> body = json::to_msgpack(doc);
     std::vector<uint8_t> out(kBinaryMagic, kBinaryMagic + 4);
-    out.push_back((uint8_t)kFormatVersion);
+    out.push_back(doc.at("version").get<uint8_t>());
     out.insert(out.end(), body.begin(), body.end());
     return out;
-}
-
-static bool validate(const Skeleton& sk, std::string* error) {
-    auto fail = [&](const std::string& m) {
-        if (error) *error = m;
-        return false;
-    };
-    int nb = (int)sk.bones.size(), ns = (int)sk.slots.size(), ni = (int)sk.images.size(), ne = (int)sk.events.size();
-    for (int i = 0; i < nb; ++i) {
-        int p = sk.bones[i].parent;
-        if (p < -1 || p >= nb || p == i) return fail("bone " + sk.bones[i].name + ": invalid parent");
-    }
-    if ((int)sk.updateOrder().size() != nb) return fail("bone hierarchy contains a cycle");
-    for (auto& s : sk.slots) {
-        if (s.bone < 0 || s.bone >= nb) return fail("slot " + s.name + ": invalid bone");
-        if (s.activeAttachment >= (int)s.attachments.size()) return fail("slot " + s.name + ": invalid active attachment");
-        for (auto& a : s.attachments) {
-            if (a.image < -1 || a.image >= ni) return fail("attachment " + a.name + ": invalid image");
-            if (a.type == AttachmentType::Region || a.skinPlaceholder) continue;
-            size_t nv = a.vertexCount();
-            if (a.type == AttachmentType::Mesh && a.uvs.size() != nv) return fail("mesh " + a.name + ": vertex count mismatch");
-            if (a.hullLength < 0 || a.hullLength > (int)nv) return fail("mesh " + a.name + ": invalid hull");
-            if (a.endSlot < -1 || a.endSlot >= ns) return fail("clipping " + a.name + ": invalid end slot");
-            for (int t : a.triangles)
-                if (t < 0 || t >= (int)nv) return fail("mesh " + a.name + ": invalid triangle index");
-            for (auto& list : a.weights)
-                for (auto& w : list)
-                    if (w.bone < 0 || w.bone >= nb) return fail("mesh " + a.name + ": invalid weight bone");
-        }
-    }
-    for (auto& an : sk.animations) {
-        for (auto& [bi, tl] : an.bones)
-            if (bi < 0 || bi >= nb) return fail("animation " + an.name + ": invalid bone");
-        for (auto& [si, tl] : an.slots) {
-            if (si < 0 || si >= ns) return fail("animation " + an.name + ": invalid slot");
-            for (auto& [ai, keys] : tl.deform) {
-                if (ai < 0 || ai >= (int)sk.slots[si].attachments.size()) return fail("animation " + an.name + ": invalid deform attachment");
-                if (sk.slots[si].attachments[ai].skinPlaceholder) continue;  // skin attachments may differ
-                size_t nv = sk.slots[si].attachments[ai].vertexCount();
-                for (auto& k : keys)
-                    if (k.value.size() != nv) return fail("animation " + an.name + ": deform key vertex count mismatch");
-            }
-        }
-        for (auto& k : an.drawOrder) {
-            std::vector<bool> seen(ns, false);
-            if ((int)k.order.size() != ns) return fail("animation " + an.name + ": draw order key has wrong size");
-            for (int s : k.order) {
-                if (s < 0 || s >= ns || seen[s]) return fail("animation " + an.name + ": draw order key is not a permutation");
-                seen[s] = true;
-            }
-        }
-        for (auto& k : an.events)
-            if (k.event < 0 || k.event >= ne) return fail("animation " + an.name + ": invalid event");
-        for (auto& [ci, keys] : an.constraints)
-            if (ci < 0 || ci >= (int)sk.constraints.size()) return fail("animation " + an.name + ": invalid constraint");
-    }
-    for (auto& skin : sk.skins) {
-        for (int b : skin.bones)
-            if (b < 0 || b >= nb) return fail("skin " + skin.name + ": invalid bone");
-        for (int c : skin.constraints)
-            if (c < 0 || c >= (int)sk.constraints.size()) return fail("skin " + skin.name + ": invalid constraint");
-        for (auto& e : skin.attachments) {
-            if (e.slot < 0 || e.slot >= ns) return fail("skin " + skin.name + ": invalid slot");
-            if (e.attachment.image < -1 || e.attachment.image >= ni) return fail("skin " + skin.name + ": invalid image");
-        }
-    }
-    for (auto& c : sk.constraints) {
-        for (int b : c.bones)
-            if (b < 0 || b >= nb) return fail("constraint " + c.name + ": invalid bone");
-        if (c.bones.empty()) return fail("constraint " + c.name + ": no bones");
-        if (c.type == ConstraintType::Path ? (c.target < 0 || c.target >= ns)
-                                           : (c.type != ConstraintType::Physics && (c.target < 0 || c.target >= nb)))
-            return fail("constraint " + c.name + ": invalid target");
-    }
-    return true;
 }
 
 static bool fromDocument(const json& root, Skeleton& out, std::string* error);
@@ -478,6 +478,26 @@ static bool fromDocument(const json& root, Skeleton& out, std::string* error) {
             return false;
         }
         Skeleton sk;
+        if (root.contains("effects")) {
+            const auto& j = root.at("effects");
+            const auto& l = j.at("light"); const auto& p = j.at("pixel");
+            auto color = [](const json& c) {
+                if (!c.is_array() || c.size() != 3) throw std::runtime_error("Expected three RGB components");
+                return c.get<std::array<float, 3>>();
+            };
+            if (!l.at("position").is_array() || l.at("position").size() != 2 || !p.at("palette").is_array() || p.at("palette").size() > 256 ||
+                !p.at("size").is_number_integer()) throw std::runtime_error("Invalid light / pixel structure");
+            auto& light = sk.effects.light; auto& pixel = sk.effects.pixel;
+            light.enabled = l.at("enabled").get<bool>(); light.position = {l.at("position")[0].get<float>(), l.at("position")[1].get<float>()};
+            light.color = color(l.at("color")); light.radius = l.at("radius").get<float>();
+            light.intensity = l.at("intensity").get<float>(); light.ambient = l.at("ambient").get<float>();
+            pixel.enabled = p.at("enabled").get<bool>(); pixel.size = p.at("size").get<int>();
+            pixel.quantize = p.at("quantize").get<bool>(); pixel.dither = p.at("dither").get<bool>(); pixel.outline = p.at("outline").get<bool>();
+            pixel.outlineColor = color(p.at("outlineColor")); pixel.palette.clear();
+            for (const auto& c : p.at("palette")) pixel.palette.push_back(color(c));
+            std::string detail;
+            if (!validRenderEffects(sk.effects, &detail)) throw std::runtime_error(detail);
+        }
         for (auto& j : root.at("images")) {
             Image im;
             im.path = j.at("path").get<std::string>();
@@ -500,6 +520,8 @@ static bool fromDocument(const json& root, Skeleton& out, std::string* error) {
             s.bone = j.at("bone").get<int>();
             s.activeAttachment = j.value("active", -1);
             if (j.contains("color")) s.color = colorFrom(j["color"]);
+            if (!parseBlendMode(j.value("blend", std::string("normal")), s.blend))
+                throw std::runtime_error("unsupported slot blend mode: " + j.at("blend").get<std::string>());
             for (auto& ja : j.at("attachments")) {
                 Attachment a = attachmentFrom(ja);
                 s.attachments.push_back(a);
@@ -594,11 +616,14 @@ static bool fromDocument(const json& root, Skeleton& out, std::string* error) {
                 SlotTimeline tl;
                 for (auto& k : jt.at("attachment")) tl.attachment.push_back({k.at("time").get<float>(), k.at("value").get<int>()});
                 if (jt.contains("color"))
-                    for (auto& k : jt["color"]) tl.color.push_back({k.at("time").get<float>(), colorFrom(k.at("color")), curveFrom(k)});
+                    for (auto& k : jt["color"]) {
+                        ColorKey key{k.at("time").get<float>(),colorFrom(k.at("color")),curveFrom(k)};
+                        componentFieldsFrom(k,key,15); tl.color.push_back(std::move(key));
+                    }
                 if (jt.contains("deform"))
                     for (auto& dj : jt["deform"]) {
                         std::vector<DeformKey>& keys = tl.deform[dj.at("attachment").get<int>()];
-                        for (auto& k : dj.at("keys")) keys.push_back({k.at("time").get<float>(), vecListFrom(k.at("offsets")), curveFrom(k)});
+                        for (auto& k : dj.at("keys")) keys.push_back({k.at("time").get<float>(), vecListFrom(k.at("offsets")), curveFrom(k),deformSkinFrom(k,"skin",-2,-2)});
                     }
                 an.slots[jt.at("slot").get<int>()] = tl;
             }
@@ -625,7 +650,7 @@ static bool fromDocument(const json& root, Skeleton& out, std::string* error) {
             std::stable_sort(an.events.begin(), an.events.end(), byTime);
             sk.animations.push_back(an);
         }
-        if (!validate(sk, error)) return false;
+        if (!validateSkeleton(sk, error)) return false;
         out = std::move(sk);
         return true;
     } catch (const std::exception& e) {
@@ -635,28 +660,22 @@ static bool fromDocument(const json& root, Skeleton& out, std::string* error) {
 }
 
 bool exportFile(const std::string& path, const Skeleton& sk, const ExportOptions& options, std::string* error) {
-    std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
-    if (!f) {
-        if (error) *error = "cannot open file for writing";
+    if (error) error->clear();
+    try {
+        if (!validateSkeleton(sk, error)) return false;
+        if (options.binary) {
+            const std::vector<uint8_t> data = toBinary(sk, options.decimals);
+            return writeFileAtomic(path, std::string_view((const char*)data.data(), data.size()), error);
+        }
+        return writeFileAtomic(path, toJson(sk, options), error);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
         return false;
     }
-    if (options.binary) {
-        std::vector<uint8_t> data = toBinary(sk, options.decimals);
-        f.write((const char*)data.data(), (std::streamsize)data.size());
-    } else {
-        f << toJson(sk, options);
-    }
-    return (bool)f;
 }
 
 bool saveFile(const std::string& path, const Skeleton& sk, std::string* error) {
-    std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
-    if (!f) {
-        if (error) *error = "cannot open file for writing";
-        return false;
-    }
-    f << toJson(sk);
-    return (bool)f;
+    return exportFile(path, sk, ExportOptions{}, error);
 }
 
 bool loadFile(const std::string& path, Skeleton& out, std::string* error) {

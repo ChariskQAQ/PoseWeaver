@@ -1,0 +1,16 @@
+config_version=5
+
+[application]
+config/name="Poseweaver Frames Example"
+run/main_scene="res://example/main.tscn"
+
+[display]
+window/size/viewport_width=960
+window/size/viewport_height=640
+
+[editor_plugins]
+enabled=PackedStringArray("res://addons/poseweaver/plugin.cfg")
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.12, 0.14, 0.17, 1)

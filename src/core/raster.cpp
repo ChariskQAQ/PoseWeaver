@@ -25,7 +25,13 @@ bool poseBounds(const Skeleton& sk, const Pose& pose, Vec2& lo, Vec2& hi) {
 namespace {
 struct Sampler {
     const RasterTexture& tex;
+    bool nearest = false;
     void sample(float u, float v, float out[4]) const {
+        if (nearest) {
+            int x = std::clamp((int)std::floor(u * tex.width), 0, tex.width - 1), y = std::clamp((int)std::floor(v * tex.height), 0, tex.height - 1);
+            for (int c = 0; c < 4; ++c) out[c] = tex.rgba[(size_t(y) * tex.width + x) * 4 + c] / 255.0f;
+            return;
+        }
         float x = u * tex.width - 0.5f, y = v * tex.height - 0.5f;
         int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
         float fx = x - x0, fy = y - y0;
@@ -51,22 +57,27 @@ struct Sampler {
     }
 };
 
-void blend(unsigned char* dst, const float src[4]) {
+void blend(unsigned char* dst, const float src[4], BlendMode mode) {
     float sa = src[3];
     if (sa <= 0) return;
     float da = dst[3] / 255.0f;
     float oa = sa + da * (1 - sa);
     for (int k = 0; k < 3; ++k) {
         float d = dst[k] / 255.0f;
-        float o = oa > 1e-6f ? (src[k] * sa + d * da * (1 - sa)) / oa : 0.0f;
+        float mixed = src[k];
+        if (mode == BlendMode::Multiply) mixed = src[k] * d;
+        if (mode == BlendMode::Screen) mixed = src[k] + d - src[k] * d;
+        float premult = src[k] * sa * (1 - da) + d * da * (1 - sa) + mixed * sa * da;
+        if (mode == BlendMode::Additive) premult = src[k] * sa + d * da;
+        float o = oa > 1e-6f ? premult / oa : 0.0f;
         dst[k] = (unsigned char)std::clamp((int)std::lround(o * 255), 0, 255);
     }
     dst[3] = (unsigned char)std::clamp((int)std::lround(oa * 255), 0, 255);
 }
 
-void drawTriangles(const Geometry& g, const RasterTexture& tex, const Color& tint, const Affine& toPx, int w, int h,
-                   std::vector<unsigned char>& rgba) {
-    Sampler sampler{tex};
+void drawTriangles(const Geometry& g, const RasterTexture& tex, const Color& tint, BlendMode mode, const Affine& toPx, int w, int h,
+                   std::vector<unsigned char>& rgba, bool nearest) {
+    Sampler sampler{tex, nearest};
     std::vector<Vec2> px(g.positions.size());
     for (size_t i = 0; i < px.size(); ++i) px[i] = toPx.apply(g.positions[i]);
     for (size_t t = 0; t + 2 < g.triangles.size(); t += 3) {
@@ -74,24 +85,29 @@ void drawTriangles(const Geometry& g, const RasterTexture& tex, const Color& tin
         Vec2 a = px[i0], b = px[i1], c = px[i2];
         float area = cross(b - a, c - a);
         if (std::fabs(area) < 1e-9f) continue;
+        if (area < 0) { std::swap(i1, i2); std::swap(b, c); area = -area; }
+        auto topLeft = [](Vec2 from, Vec2 to) { return to.y < from.y || (to.y == from.y && to.x > from.x); };
         int x0 = std::max(0, (int)std::floor(std::min({a.x, b.x, c.x}))), x1 = std::min(w - 1, (int)std::ceil(std::max({a.x, b.x, c.x})));
         int y0 = std::max(0, (int)std::floor(std::min({a.y, b.y, c.y}))), y1 = std::min(h - 1, (int)std::ceil(std::max({a.y, b.y, c.y})));
         for (int y = y0; y <= y1; ++y)
             for (int x = x0; x <= x1; ++x) {
                 Vec2 p{x + 0.5f, y + 0.5f};
-                float w0 = cross(b - p, c - p) / area, w1 = cross(c - p, a - p) / area, w2 = 1 - w0 - w1;
-                if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                float e0 = cross(b - p, c - p), e1 = cross(c - p, a - p), e2 = cross(a - p, b - p);
+                // Half-open edges keep adjacent triangles from blending a pixel twice.
+                if (e0 < 0 || (e0 == 0 && !topLeft(b, c)) || e1 < 0 || (e1 == 0 && !topLeft(c, a)) ||
+                    e2 < 0 || (e2 == 0 && !topLeft(a, b))) continue;
+                float w0 = e0 / area, w1 = e1 / area, w2 = e2 / area;
                 Vec2 uv = g.uvs[i0] * w0 + g.uvs[i1] * w1 + g.uvs[i2] * w2;
                 float col[4];
                 sampler.sample(uv.x, uv.y, col);
                 for (int k = 0; k < 4; ++k) col[k] *= tint[k];
-                blend(&rgba[(size_t(y) * w + x) * 4], col);
+                blend(&rgba[(size_t(y) * w + x) * 4], col, mode);
             }
     }
 }
 } // namespace
 
-void renderPose(const Skeleton& sk, const Pose& pose, const std::vector<RasterTexture>& textures, const Affine& toPx,
+void renderPoseBase(const Skeleton& sk, const Pose& pose, const std::vector<RasterTexture>& textures, const Affine& toPx,
                 int width, int height, std::vector<unsigned char>& rgba) {
     rgba.resize(size_t(width) * height * 4, 0);
     Geometry g, clipped;
@@ -112,13 +128,28 @@ void renderPose(const Skeleton& sk, const Pose& pose, const std::vector<RasterTe
                     std::swap(g, clipped);
                 }
                 const Color& tint = s < (int)pose.slotColor.size() ? pose.slotColor[s] : sk.slots[s].color;
-                drawTriangles(g, textures[att->image], tint, toPx, width, height, rgba);
+                drawTriangles(g, textures[att->image], tint, sk.slots[s].blend, toPx, width, height, rgba, sk.effects.pixel.enabled);
             }
         }
         if (endsHere) {
             clip.clear();
             clipEnd = -2;
         }
+    }
+}
+
+void renderPose(const Skeleton& sk, const Pose& pose, const std::vector<RasterTexture>& textures, const Affine& toPx,
+                int width, int height, std::vector<unsigned char>& rgba) {
+    if (!effectsActive(sk.effects)) { renderPoseBase(sk, pose, textures, toPx, width, height, rgba); return; }
+    std::vector<unsigned char> layer(size_t(width) * height * 4, 0);
+    renderPoseBase(sk, pose, textures, toPx, width, height, layer);
+    applyRenderEffects(layer, width, height, toPx, sk.effects);
+    rgba.resize(layer.size(), 0);
+    for (size_t i = 0; i < layer.size(); i += 4) {
+        if (!layer[i + 3]) continue;
+        float source[4];
+        for (int c = 0; c < 4; ++c) source[c] = layer[i + c] / 255.0f;
+        blend(rgba.data() + i, source, BlendMode::Normal);
     }
 }
 

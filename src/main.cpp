@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
 #endif
 
 #include "editor/editor.h"
@@ -11,8 +12,6 @@
 
 #include <GLFW/glfw3.h>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STBI_WINDOWS_UTF8
 #include <stb_image_write.h>
 
 #include <algorithm>
@@ -50,6 +49,8 @@ struct Options {
     std::string scenario;      // --weights | --mesh | --clip
     bool demoGraph = false;    // --graph
     bool splash = false;       // --splash: show the start-up page even with a demo / file
+    bool issues = false;       // --issues: open the diagnostics panel
+    std::string lang;          // --lang zh|en (this run only)
     std::string screenshot;  // --screenshot <png>: save after a few frames and exit
     std::vector<std::pair<std::string, std::string>> runs;  // --run <type> <path>: import/export, then exit
 };
@@ -98,6 +99,8 @@ static Options parseArgs(const std::vector<std::string>& args) {
         else if (a == "--weights" || a == "--mesh" || a == "--clip" || a == "--ik" || a == "--path" || a == "--ghost" || a == "--bake" || a == "--skin" || a == "--graphcolor" || a == "--mix") o.scenario = a.substr(2);
         else if (a == "--graph") o.demoGraph = true;
         else if (a == "--splash") o.splash = true;
+        else if (a == "--issues") o.issues = true;
+        else if (a == "--lang") o.lang = next();
         else if (a == "--screenshot") o.screenshot = next();
         else if (a == "--run") {
             std::string type = next();
@@ -109,6 +112,13 @@ static Options parseArgs(const std::vector<std::string>& args) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Establish the UI apartment before the audio engine initializes COM.
+    struct UiApartment {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        ~UiApartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+    } apartment;
+#endif
     std::vector<std::string> args = utf8Args(argc, argv);
     if (args.size() > 1) attachParentConsole();
     Options opt = parseArgs(args);
@@ -121,8 +131,9 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+    if (!opt.runs.empty() && opt.screenshot.empty()) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
-    GLFWwindow* window = glfwCreateWindow(1600, 900, "RigEditor", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1600, 900, "Poseweaver", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
@@ -147,10 +158,13 @@ int main(int argc, char** argv) {
     {
         Editor editor;
         editor.setUiScale(scale);
+        if (!opt.lang.empty()) editor.setLanguage(opt.lang, false);
         g_editor = &editor;
         glfwSetDropCallback(window, onDrop);
         if (!opt.demoImage.empty()) editor.buildDemo(opt.demoImage, opt.demoTime, opt.scenario);
         if (opt.demoGraph) editor.focusGraph();
+        if (opt.issues) editor.openIssues();
+        if (opt.demoImage.empty() && !opt.open.empty()) editor.onFilesDropped({opt.open});
         if (!opt.runs.empty()) {
             int failed = 0;
             for (auto& [type, path] : opt.runs) {
@@ -168,7 +182,6 @@ int main(int argc, char** argv) {
                 return failed ? 1 : 0;
             }
         }
-        else if (!opt.open.empty()) editor.onFilesDropped({opt.open});
         // Start-up page when nothing was given on the command line (or when asked for).
         if (opt.splash || (opt.demoImage.empty() && opt.open.empty() && opt.runs.empty() && editor.splashEnabled()))
             editor.openSplash();

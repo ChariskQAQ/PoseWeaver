@@ -1,0 +1,10 @@
+fixture,stage,samples,mean_ms,p50_ms,p95_ms
+512_mesh_128MiB,open,5,243.185,239.447,253.180
+512_mesh_128MiB,play_ui_cpu,60,9.727,9.687,10.470
+512_mesh_128MiB,checkpoint,5,76.029,73.588,82.844
+512_mesh_128MiB,undo,5,117.060,116.500,126.190
+512_mesh_128MiB,export_start,1,36.298,36.298,36.298
+512_mesh_128MiB,export_start,1,33.794,33.794,33.794
+512_mesh_128MiB,export_start,1,31.534,31.534,31.534
+512_mesh_128MiB,export_start,1,35.426,35.426,35.426
+512_mesh_128MiB,export_start,1,31.965,31.965,31.965

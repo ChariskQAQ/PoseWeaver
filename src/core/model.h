@@ -1,4 +1,5 @@
 #pragma once
+#include "core/render_effects.h"
 #include "core/math.h"
 
 #include <array>
@@ -70,6 +71,9 @@ struct Attachment {
     // Skin placeholder: has no content of its own; the active skins provide an attachment
     // registered under this attachment's name for this slot.
     bool skinPlaceholder = false;
+    // Same-slot source: -1 skin means the slot's ordinary attachment; >=0 is a skin entry.
+    int linkedAttachment = -1, linkedSkin = -1;
+    bool inheritDeform = true;
 
     bool isWeighted() const { return !weights.empty(); }
     // Polygons and paths have no uvs or triangles (paths are edited like polygons).
@@ -80,12 +84,17 @@ struct Attachment {
     size_t vertexCount() const { return isWeighted() ? weights.size() : vertices.size(); }
 };
 
+enum class BlendMode { Normal, Additive, Multiply, Screen };
+const char* blendModeName(BlendMode mode);
+bool parseBlendMode(const std::string& name, BlendMode& mode);
+
 struct Slot {
     std::string name;
     int bone = 0;
     std::vector<Attachment> attachments;
     int activeAttachment = -1;  // setup-pose attachment, -1 = none
     Color color;                // tint multiplied with the attachment's pixels
+    BlendMode blend = BlendMode::Normal;
 };
 
 // Event definition; keys may override its values.
@@ -117,12 +126,32 @@ float applyCurve(const CurveShape& c, float t);
 // ---- keys & timelines ----
 
 struct FloatKey { float time = 0; float value = 0; CurveShape curve; };
-struct Vec2Key { float time = 0; Vec2 value; CurveShape curve; };  // one curve drives both components
-struct ColorKey { float time = 0; Color value; CurveShape curve; };
+struct Vec2Key {
+    float time = 0; Vec2 value; CurveShape curve;
+    unsigned componentMask = 3;
+    bool separatedCurves = false;
+    std::array<CurveShape,2> componentCurves;
+};
+struct ColorKey {
+    float time = 0; Color value; CurveShape curve;
+    unsigned componentMask = 15;
+    bool separatedCurves = false;
+    std::array<CurveShape,4> componentCurves;
+};
+template<class K> const CurveShape& componentCurve(const K& key,int component) {
+    return key.separatedCurves ? key.componentCurves[component] : key.curve;
+}
+template<class K> CurveShape& editComponentCurve(K& key,int component) {
+    if (!key.separatedCurves) { key.componentCurves.fill(key.curve); key.separatedCurves = true; }
+    return key.componentCurves[component];
+}
 struct IntKey { float time = 0; int value = -1; };
 // Per-vertex offsets added to a mesh / polygon attachment (slot-bone space for unweighted
 // vertices, blended bone space for weighted ones).
-struct DeformKey { float time = 0; std::vector<Vec2> value; CurveShape curve; };
+struct DeformKey {
+    float time = 0; std::vector<Vec2> value; CurveShape curve;
+    int skin = -2; // -2 keeps legacy shared keys; -1 is the base attachment, >=0 a particular skin.
+};
 // Draw order as slot indices from back to front; always a permutation of all slots.
 struct DrawOrderKey { float time = 0; std::vector<int> order; };
 struct EventKey {
@@ -230,6 +259,7 @@ struct Animation {
 };
 
 struct Skeleton {
+    RenderEffects effects;
     std::vector<Bone> bones;
     std::vector<Slot> slots;  // order = setup draw order (back to front)
     std::vector<Image> images;
@@ -268,6 +298,11 @@ struct Skeleton {
     // when it is a placeholder no active skin fills.
     const Attachment* resolve(const std::vector<int>& activeSkins, int slot, int index) const;
     Attachment* resolve(const std::vector<int>& activeSkins, int slot, int index);
+    const Attachment* attachmentAt(int slot,int index,int skin) const;
+    int attachmentSkin(int slot,const Attachment* attachment) const;
+    const Attachment* meshSource(int slot,const Attachment& attachment) const;
+    bool detachLinkedMesh(int slot,Attachment& attachment);
+    void refreshLinkedMesh(int slot,Attachment& attachment) const;
     // Swaps two constraints (application order), keeping their keys.
     void swapConstraints(int a, int b);
     // Removes an attachment from a slot, fixing the active attachment, attachment keys and deform keys.
@@ -283,10 +318,17 @@ void setScaleKey(Animation& anim, int bone, float time, Vec2 value);
 void setShearKey(Animation& anim, int bone, float time, Vec2 value);
 void setAttachmentKey(Animation& anim, int slot, float time, int attachment);
 void setColorKey(Animation& anim, int slot, float time, const Color& color);
+// Graph component edits leave the other components' keys and interpolation untouched.
+bool setComponentKey(Animation& anim,int index,Channel channel,int component,float time,float value);
+bool moveComponentKey(Animation& anim,int index,Channel channel,int component,float from,float to);
+bool removeComponentKey(Animation& anim,int index,Channel channel,int component,float time);
+bool usesComponentKeys(const Skeleton& skeleton);
 void setDrawOrderKey(Animation& anim, float time, const std::vector<int>& order);
 // Events can share a time only if they are different events; same event at same time replaces.
 void setEventKey(Animation& anim, float time, int event, const EventDef& def);
-void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets);
+void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets,int skin = -2);
+bool hasDeformKey(const Animation& anim,int slot,int attachment,float time,int skin);
+void removeDeformKey(Animation& anim,int slot,int attachment,float time,int skin);
 void setConstraintKey(Animation& anim, int constraint, float time, const ConstraintValues& values);
 
 // `index` = bone for bone channels, slot for slot channels, event for Event, ignored for DrawOrder.

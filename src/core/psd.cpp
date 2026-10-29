@@ -144,7 +144,10 @@ bool parsePsd(const std::vector<uint8_t>& bytes, PsdDocument& doc, std::string* 
                 rec.channels.push_back({id, len});
             }
             if (r.str(4) != "8BIM") throw std::runtime_error("bad layer blend signature");
-            r.skip(4);  // blend mode
+            rec.layer.blendKey = r.str(4);
+            if (rec.layer.blendKey == "lddg") rec.layer.blend = BlendMode::Additive;
+            if (rec.layer.blendKey == "mul ") rec.layer.blend = BlendMode::Multiply;
+            if (rec.layer.blendKey == "scrn") rec.layer.blend = BlendMode::Screen;
             rec.layer.opacity = r.u8() / 255.0f;
             r.u8();  // clipping
             uint8_t flags = r.u8();

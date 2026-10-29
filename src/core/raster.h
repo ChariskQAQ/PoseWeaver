@@ -20,6 +20,10 @@ bool poseBounds(const Skeleton& sk, const Pose& pose, Vec2& lo, Vec2& hi);
 void renderPose(const Skeleton& sk, const Pose& pose, const std::vector<RasterTexture>& textures, const Affine& worldToPixel,
                 int width, int height, std::vector<unsigned char>& rgba);
 
+// Composite geometry without post effects; pixel mode still selects nearest texture sampling.
+void renderPoseBase(const Skeleton& sk, const Pose& pose, const std::vector<RasterTexture>& textures, const Affine& worldToPixel,
+                    int width, int height, std::vector<unsigned char>& rgba);
+
 // Box-filters an image down by an integer factor (supersampling).
 std::vector<unsigned char> downsample(const std::vector<unsigned char>& rgba, int width, int height, int factor);
 

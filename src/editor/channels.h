@@ -2,20 +2,21 @@
 // Display helpers shared by the dopesheet and the graph view.
 #include "core/model.h"
 #include "editor/icons.h"
+#include "editor/i18n.h"
 #include "editor/theme.h"
 
 inline const char* channelName(rig::Channel ch) {
     switch (ch) {
-    case rig::Channel::Rotate: return "旋转";
-    case rig::Channel::Translate: return "移动";
-    case rig::Channel::Scale: return "缩放";
-    case rig::Channel::Shear: return "斜切";
-    case rig::Channel::Attachment: return "附件";
-    case rig::Channel::Color: return "颜色";
-    case rig::Channel::DrawOrder: return "绘制顺序";
-    case rig::Channel::Event: return "事件";
-    case rig::Channel::Deform: return "变形";
-    case rig::Channel::Constraint: return "约束";
+    case rig::Channel::Rotate: return tr("旋转");
+    case rig::Channel::Translate: return tr("移动");
+    case rig::Channel::Scale: return tr("缩放");
+    case rig::Channel::Shear: return tr("斜切");
+    case rig::Channel::Attachment: return tr("附件");
+    case rig::Channel::Color: return tr("颜色");
+    case rig::Channel::DrawOrder: return tr("绘制顺序");
+    case rig::Channel::Event: return tr("事件");
+    case rig::Channel::Deform: return tr("变形");
+    case rig::Channel::Constraint: return tr("约束");
     }
     return "";
 }
@@ -67,10 +68,10 @@ inline Icon constraintIcon(rig::ConstraintType t) {
 
 inline const char* constraintTypeName(rig::ConstraintType t) {
     switch (t) {
-    case rig::ConstraintType::Ik: return "IK 约束";
-    case rig::ConstraintType::Transform: return "变换约束";
-    case rig::ConstraintType::Path: return "路径约束";
-    case rig::ConstraintType::Physics: return "物理约束";
+    case rig::ConstraintType::Ik: return tr("IK 约束");
+    case rig::ConstraintType::Transform: return tr("变换约束");
+    case rig::ConstraintType::Path: return tr("路径约束");
+    case rig::ConstraintType::Physics: return tr("物理约束");
     }
-    return "约束";
+    return tr("约束");
 }

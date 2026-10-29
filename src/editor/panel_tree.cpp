@@ -1,5 +1,6 @@
 // Tree view: skeleton → bone hierarchy (with slots and attachments), draw order, animations, images.
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "core/mesh_tools.h"
 #include "editor/channels.h"
@@ -78,7 +79,7 @@ RowResult treeRow(const void* id, Icon icon, const std::string& label, bool sele
 
 void Editor::drawTree() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    bool visible = ImGui::Begin("树###Tree");
+    bool visible = ImGui::Begin(tr("树###Tree"));
     ImGui::PopStyleVar();
     if (!visible) {
         ImGui::End();
@@ -91,15 +92,15 @@ void Editor::drawTree() {
     // ---- search & filters ----
     float fh = ImGui::GetFrameHeight();
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - (fh * 1.15f + 3) * 4);
-    ImGui::InputTextWithHint("##search", "搜索名称", &treeFilter_);
+    ImGui::InputTextWithHint("##search", tr("搜索名称"), &treeFilter_);
     ImGui::SameLine(0, 3);
-    if (iconOnlyButton("fb", Icon::Bone, treeShowBones_, "显示骨骼")) treeShowBones_ = !treeShowBones_;
+    if (iconOnlyButton("fb", Icon::Bone, treeShowBones_, tr("显示骨骼"))) treeShowBones_ = !treeShowBones_;
     ImGui::SameLine(0, 3);
-    if (iconOnlyButton("fs", Icon::Slot, treeShowSlots_, "显示插槽")) treeShowSlots_ = !treeShowSlots_;
+    if (iconOnlyButton("fs", Icon::Slot, treeShowSlots_, tr("显示插槽"))) treeShowSlots_ = !treeShowSlots_;
     ImGui::SameLine(0, 3);
-    if (iconOnlyButton("fa", Icon::Region, treeShowAttachments_, "显示附件")) treeShowAttachments_ = !treeShowAttachments_;
+    if (iconOnlyButton("fa", Icon::Region, treeShowAttachments_, tr("显示附件"))) treeShowAttachments_ = !treeShowAttachments_;
     ImGui::SameLine(0, 3);
-    if (iconOnlyButton("imp", Icon::Image, false, "导入图片 (Ctrl+I)")) importImageDialog();
+    if (iconOnlyButton("imp", Icon::Image, false, tr("导入图片 (Ctrl+I)"))) importImageDialog();
     const std::string filter = lower(treeFilter_);
     auto matches = [&](const std::string& name) { return filter.empty() || lower(name).find(filter) != std::string::npos; };
 
@@ -159,13 +160,14 @@ void Editor::drawTree() {
     // Open the ancestors of the selection so it is visible in the tree.
     std::vector<bool> forceOpen(sk_.bones.size(), false);
     if (scrollTreeToSelection_ && sel_.bone >= 0)
-        for (int b = sk_.bones[sel_.bone].parent; b >= 0; b = sk_.bones[b].parent) forceOpen[b] = true;
+        for (int b = sel_.bone; b >= 0 && b < (int)sk_.bones.size() && !forceOpen[b]; b = sk_.bones[b].parent) forceOpen[b] = true;
 
     bool deferDelete = false;  // deleting while iterating the tree would invalidate indices
 
     // ---- skeleton root ----
     ImGui::TableNextRow();
-    RowResult root = treeRow("skeleton", Icon::Skeleton, "骨架", sel_.kind == Selection::Skeleton, false, true);
+    if (scrollTreeToSelection_) ImGui::SetNextItemOpen(true);
+    RowResult root = treeRow("skeleton", Icon::Skeleton, tr("骨架"), sel_.kind == Selection::Skeleton, false, true);
     if (root.clicked) {
         sel_.clear();
         sel_.kind = Selection::Skeleton;
@@ -185,14 +187,14 @@ void Editor::drawTree() {
         if (treeShowBones_) {
             ImGui::TableNextRow();
             bool hidden = hiddenBones_.count(b) > 0;
-            if (visCell("v", !hidden, "在视口中显示/隐藏（仅编辑器）")) hidden ? (void)hiddenBones_.erase(b) : (void)hiddenBones_.insert(b);
+            if (visCell("v", !hidden, tr("在视口中显示/隐藏（仅编辑器）"))) hidden ? (void)hiddenBones_.erase(b) : (void)hiddenBones_.insert(b);
             if (animate) {
                 KeyState st = KeyState::None;
                 for (Channel ch : {Channel::Rotate, Channel::Translate, Channel::Scale}) {
                     KeyState k = boneKeyState(b, ch);
                     if (k == KeyState::Changed || (k == KeyState::Keyed && st == KeyState::None)) st = k;
                 }
-                if (keyCell("k", st, st == KeyState::Changed ? "为未打帧的改动打关键帧" : "为该骨骼打全部关键帧")) {
+                if (keyCell("k", st, st == KeyState::Changed ? tr("为未打帧的改动打关键帧") : tr("为该骨骼打全部关键帧"))) {
                     auto it = pending_.find(b);
                     if (it != pending_.end()) keyBone(b, it->second.rot, it->second.trans, it->second.scale);
                     else keyBone(b, true, true, true);
@@ -212,14 +214,14 @@ void Editor::drawTree() {
             }
             if (setup && ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("BONE", &b, sizeof(int));
-                ImGui::Text("骨骼 %s", bone.name.c_str());
+                ImGui::Text(tr("骨骼 %s"), bone.name.c_str());
                 ImGui::EndDragDropSource();
             }
             if (setup && ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("BONE")) {
                     int dragged = *(const int*)p->Data;
                     if (sk_.isAncestor(dragged, b)) {
-                        setStatus("不能把骨骼拖到它自己的子骨骼下");
+                        setStatus(tr("不能把骨骼拖到它自己的子骨骼下"));
                     } else {
                         checkpoint();
                         sk_.reparentBone(dragged, b);
@@ -232,20 +234,20 @@ void Editor::drawTree() {
                 ImGui::EndDragDropTarget();
             }
             if (ImGui::BeginPopup("ctx")) {
-                if (ImGui::MenuItem("新建子骨骼", nullptr, false, setup)) {
+                if (ImGui::MenuItem(tr("新建子骨骼"), nullptr, false, setup)) {
                     checkpoint();
                     Transform t;
                     t.x = bone.length;
                     selectBone(sk_.addBone("bone", b, t, 50));
                 }
-                if (ImGui::BeginMenu("新建约束", setup)) {
-                    if (ImGui::MenuItem("IK 约束")) selectConstraint(createConstraint(ConstraintType::Ik));
-                    if (ImGui::MenuItem("变换约束")) selectConstraint(createConstraint(ConstraintType::Transform));
-                    if (ImGui::MenuItem("路径约束")) selectConstraint(createConstraint(ConstraintType::Path));
-                    if (ImGui::MenuItem("物理约束")) selectConstraint(createConstraint(ConstraintType::Physics));
+                if (ImGui::BeginMenu(tr("新建约束"), setup)) {
+                    if (ImGui::MenuItem(tr("IK 约束"))) selectConstraint(createConstraint(ConstraintType::Ik));
+                    if (ImGui::MenuItem(tr("变换约束"))) selectConstraint(createConstraint(ConstraintType::Transform));
+                    if (ImGui::MenuItem(tr("路径约束"))) selectConstraint(createConstraint(ConstraintType::Path));
+                    if (ImGui::MenuItem(tr("物理约束"))) selectConstraint(createConstraint(ConstraintType::Physics));
                     ImGui::EndMenu();
                 }
-                if (ImGui::MenuItem("新建插槽", nullptr, false, setup)) {
+                if (ImGui::MenuItem(tr("新建插槽"), nullptr, false, setup)) {
                     checkpoint();
                     Slot s;
                     s.name = sk_.uniqueSlotName("slot");
@@ -254,8 +256,8 @@ void Editor::drawTree() {
                     selectSlot((int)sk_.slots.size() - 1);
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("重命名", "F2")) openRename_ = true;
-                if (ImGui::MenuItem("删除", "Del", false, setup && sk_.bones.size() > 1)) deferDelete = true;
+                if (ImGui::MenuItem(tr("重命名"), "F2")) openRename_ = true;
+                if (ImGui::MenuItem(tr("删除"), "Del", false, setup && sk_.bones.size() > 1)) deferDelete = true;
                 ImGui::EndPopup();
             }
         }
@@ -272,9 +274,10 @@ void Editor::drawTree() {
                 if (treeShowSlots_) {
                     ImGui::TableNextRow();
                     bool hidden = hiddenSlots_.count(s) > 0;
-                    if (visCell("v", !hidden, "在视口中显示/隐藏（仅编辑器）")) hidden ? (void)hiddenSlots_.erase(s) : (void)hiddenSlots_.insert(s);
-                    if (keyCell("k", slotKeyState(s), "为当前显示的附件打关键帧")) setSlotAttachment(s, current);
+                    if (visCell("v", !hidden, tr("在视口中显示/隐藏（仅编辑器）"))) hidden ? (void)hiddenSlots_.erase(s) : (void)hiddenSlots_.insert(s);
+                    if (keyCell("k", slotKeyState(s), tr("为当前显示的附件打关键帧"))) setSlotAttachment(s, current);
                     bool selected = sel_.kind == Selection::Slot && sel_.slot == s;
+                    if (scrollTreeToSelection_ && sel_.slot == s) ImGui::SetNextItemOpen(true);
                     RowResult r = treeRow("slot", Icon::Slot, slot.name, selected, slot.attachments.empty(), false,
                                           hidden ? IM_COL32(140, 140, 140, 255) : 0);
                     scrollIfSelected(selected);
@@ -282,7 +285,7 @@ void Editor::drawTree() {
                     if (r.clicked) selectSlot(s);
                     if (setup && ImGui::BeginDragDropSource()) {
                         ImGui::SetDragDropPayload("SLOT", &s, sizeof(int));
-                        ImGui::Text("插槽 %s", slot.name.c_str());
+                        ImGui::Text(tr("插槽 %s"), slot.name.c_str());
                         ImGui::EndDragDropSource();
                     }
                 }
@@ -292,7 +295,7 @@ void Editor::drawTree() {
                         ImGui::PushID(a);
                         ImGui::TableNextRow();
                         bool active = current == a;
-                        if (visCell("v", active, active ? "隐藏该附件" : "显示该附件（Animate 模式下会打关键帧）"))
+                        if (visCell("v", active, active ? tr("隐藏该附件") : tr("显示该附件（Animate 模式下会打关键帧）")))
                             setSlotAttachment(s, active ? -1 : a);
                         bool selected = sel_.kind == Selection::Attachment && sel_.slot == s && sel_.attachment == a;
                         // Placeholders show what the active skins put there.
@@ -304,7 +307,7 @@ void Editor::drawTree() {
                                     : shown->type == AttachmentType::Path        ? Icon::PathC
                                                                                  : Icon::Region;
                         std::string label = att.name;
-                        if (att.skinPlaceholder) label += shown ? "  [皮肤: " + shown->name + "]" : "  [皮肤: 无]";
+                        if (att.skinPlaceholder) label += shown ? tr("  [皮肤: ") + shown->name + "]" : tr("  [皮肤: 无]");
                         RowResult r = treeRow("att", icon, label,
                                               selected, true, false, active ? 0 : IM_COL32(150, 150, 150, 255));
                         scrollIfSelected(selected);
@@ -327,11 +330,11 @@ void Editor::drawTree() {
     // ---- draw order (front first; in Animate mode this is the animated order and edits are keyed) ----
     ImGui::TableNextRow();
     if (animate && an &&
-        keyCell("dok", hasKey(*an, -1, Channel::DrawOrder, time_) ? KeyState::Keyed : KeyState::None, "为当前绘制顺序打关键帧")) {
+        keyCell("dok", hasKey(*an, -1, Channel::DrawOrder, time_) ? KeyState::Keyed : KeyState::None, tr("为当前绘制顺序打关键帧"))) {
         checkpoint();
         setDrawOrderKey(*an, time_, pose_.drawOrder);
     }
-    RowResult dor = treeRow("draworder", Icon::DrawOrder, "绘制顺序", false, sk_.slots.empty(), false);
+    RowResult dor = treeRow("draworder", Icon::DrawOrder, tr("绘制顺序"), false, sk_.slots.empty(), false);
     int moveFrom = -1, moveTo = -1;
     if (dor.open) {
         for (int i = (int)pose_.drawOrder.size() - 1; i >= 0; --i) {
@@ -343,7 +346,7 @@ void Editor::drawTree() {
             if (r.clicked) selectSlot(s);
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("DRAWORDER", &s, sizeof(int));
-                ImGui::Text("移动 %s", sk_.slots[s].name.c_str());
+                ImGui::Text(tr("移动 %s"), sk_.slots[s].name.c_str());
                 ImGui::EndDragDropSource();
             }
             if (ImGui::BeginDragDropTarget()) {
@@ -383,11 +386,12 @@ void Editor::drawTree() {
 
     // ---- skins ----
     ImGui::TableNextRow();
-    RowResult skins = treeRow("skins", Icon::Skin, "皮肤", false, sk_.skins.empty(), false);
+    if (scrollTreeToSelection_ && sel_.kind == Selection::Skin) ImGui::SetNextItemOpen(true);
+    RowResult skins = treeRow("skins", Icon::Skin, tr("皮肤"), false, sk_.skins.empty(), false);
     if (skins.doubleClicked && setup) selectSkin(createSkin("skin"));
     if (skins.rightClicked) ImGui::OpenPopup("skinctx");
     if (ImGui::BeginPopup("skinctx")) {
-        if (ImGui::MenuItem("新建皮肤", nullptr, false, setup)) selectSkin(createSkin("skin"));
+        if (ImGui::MenuItem(tr("新建皮肤"), nullptr, false, setup)) selectSkin(createSkin("skin"));
         ImGui::EndPopup();
     }
     if (skins.open) {
@@ -396,7 +400,7 @@ void Editor::drawTree() {
             ImGui::TableNextRow();
             auto pos = std::find(activeSkins_.begin(), activeSkins_.end(), i);
             bool active = pos != activeSkins_.end();
-            if (visCell("v", active, "激活/取消这个皮肤（可同时激活多个，后激活的优先）")) toggleSkin(i);
+            if (visCell("v", active, tr("激活/取消这个皮肤（可同时激活多个，后激活的优先）"))) toggleSkin(i);
             bool selected = sel_.kind == Selection::Skin && sel_.index == i;
             std::string label = sk_.skins[i].name;
             if (active && activeSkins_.size() > 1) label += "  #" + std::to_string(pos - activeSkins_.begin() + 1);
@@ -413,14 +417,15 @@ void Editor::drawTree() {
 
     // ---- constraints ----
     ImGui::TableNextRow();
-    RowResult cons = treeRow("constraints", Icon::Constraint, "约束", false, sk_.constraints.empty(), false);
+    if (scrollTreeToSelection_ && sel_.kind == Selection::Constraint) ImGui::SetNextItemOpen(true);
+    RowResult cons = treeRow("constraints", Icon::Constraint, tr("约束"), false, sk_.constraints.empty(), false);
     if (cons.rightClicked) ImGui::OpenPopup("conctx");
     if (ImGui::BeginPopup("conctx")) {
-        ImGui::TextDisabled("约束所选骨骼");
-        if (ImGui::MenuItem("IK 约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Ik));
-        if (ImGui::MenuItem("变换约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Transform));
-        if (ImGui::MenuItem("路径约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Path));
-        if (ImGui::MenuItem("物理约束", nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Physics));
+        ImGui::TextDisabled(tr("约束所选骨骼"));
+        if (ImGui::MenuItem(tr("IK 约束"), nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Ik));
+        if (ImGui::MenuItem(tr("变换约束"), nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Transform));
+        if (ImGui::MenuItem(tr("路径约束"), nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Path));
+        if (ImGui::MenuItem(tr("物理约束"), nullptr, false, setup)) selectConstraint(createConstraint(ConstraintType::Physics));
         ImGui::EndPopup();
     }
     if (cons.open) {
@@ -428,7 +433,7 @@ void Editor::drawTree() {
             ImGui::PushID(12000 + i);
             ImGui::TableNextRow();
             const Constraint& c = sk_.constraints[i];
-            if (animate && an && keyCell("k", hasKey(*an, i, Channel::Constraint, time_) ? KeyState::Keyed : KeyState::None, "为约束的当前数值打关键帧"))
+            if (animate && an && keyCell("k", hasKey(*an, i, Channel::Constraint, time_) ? KeyState::Keyed : KeyState::None, tr("为约束的当前数值打关键帧")))
                 keyConstraint(i);
             bool selected = sel_.kind == Selection::Constraint && sel_.index == i;
             RowResult r = treeRow("c", constraintIcon(c.type), c.name, selected, true, false);
@@ -440,11 +445,12 @@ void Editor::drawTree() {
 
     // ---- animations ----
     ImGui::TableNextRow();
-    RowResult anims = treeRow("animations", Icon::Animation, "动画", false, false, true);
+    if (scrollTreeToSelection_ && sel_.kind == Selection::Animation) ImGui::SetNextItemOpen(true);
+    RowResult anims = treeRow("animations", Icon::Animation, tr("动画"), false, false, true);
     if (anims.doubleClicked) selectAnimation(createAnimation());
     if (anims.rightClicked) ImGui::OpenPopup("animctx");
     if (ImGui::BeginPopup("animctx")) {
-        if (ImGui::MenuItem("新建动画")) selectAnimation(createAnimation());
+        if (ImGui::MenuItem(tr("新建动画"))) selectAnimation(createAnimation());
         ImGui::EndPopup();
     }
     if (anims.open) {
@@ -452,7 +458,7 @@ void Editor::drawTree() {
             ImGui::PushID(9000 + i);
             ImGui::TableNextRow();
             bool active = anim_ == i;
-            if (visCell("v", active, "设为当前动画")) selectAnimation(i);
+            if (visCell("v", active, tr("设为当前动画"))) selectAnimation(i);
             bool selected = sel_.kind == Selection::Animation && sel_.index == i;
             RowResult r = treeRow("a", Icon::Animation, sk_.animations[i].name, selected, true, false,
                                   active ? 0 : IM_COL32(160, 160, 160, 255));
@@ -464,7 +470,8 @@ void Editor::drawTree() {
 
     // ---- events ----
     ImGui::TableNextRow();
-    RowResult evs = treeRow("events", Icon::Event, "事件", false, false, false);
+    if (scrollTreeToSelection_ && sel_.kind == Selection::Event) ImGui::SetNextItemOpen(true);
+    RowResult evs = treeRow("events", Icon::Event, tr("事件"), false, false, false);
     if (evs.doubleClicked) {
         checkpoint();
         EventDef e;
@@ -474,7 +481,7 @@ void Editor::drawTree() {
     }
     if (evs.rightClicked) ImGui::OpenPopup("evctx");
     if (ImGui::BeginPopup("evctx")) {
-        if (ImGui::MenuItem("新建事件")) {
+        if (ImGui::MenuItem(tr("新建事件"))) {
             checkpoint();
             EventDef e;
             e.name = sk_.uniqueEventName("event");
@@ -488,7 +495,7 @@ void Editor::drawTree() {
             ImGui::PushID(15000 + i);
             ImGui::TableNextRow();
             if (animate && an && keyCell("k", hasKey(*an, i, Channel::Event, time_) ? KeyState::Keyed : KeyState::None,
-                                         "在当前帧插入该事件"))
+                                         tr("在当前帧插入该事件")))
                 keyEvent(i);
             bool selected = sel_.kind == Selection::Event && sel_.index == i;
             RowResult r = treeRow("e", Icon::Event, sk_.events[i].name, selected, true, false);
@@ -500,7 +507,8 @@ void Editor::drawTree() {
 
     // ---- images ----
     ImGui::TableNextRow();
-    RowResult imgs = treeRow("images", Icon::Image, "图片", false, sk_.images.empty(), false);
+    if (scrollTreeToSelection_ && sel_.kind == Selection::Image) ImGui::SetNextItemOpen(true);
+    RowResult imgs = treeRow("images", Icon::Image, tr("图片"), false, sk_.images.empty(), false);
     if (imgs.open) {
         for (int i = 0; i < (int)sk_.images.size(); ++i) {
             ImGui::PushID(20000 + i);

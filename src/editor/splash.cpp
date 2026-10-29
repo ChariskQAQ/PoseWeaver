@@ -1,8 +1,10 @@
 // Start-up splash (banner, new / recent / open / restore), the shortcuts window, and the persistent
 // user settings behind them (recent files, splash on/off) plus the "restore last session" file.
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "core/serialize.h"
+#include "core/file_io.h"
 #include "editor/icons.h"
 #include "editor/theme.h"
 #include "platform/file_dialog.h"
@@ -23,13 +25,14 @@ namespace fs = std::filesystem;
 using namespace rig;
 
 namespace {
-#ifdef RIGEDITOR_VERSION
-constexpr const char* kAppVersion = RIGEDITOR_VERSION;
+#ifdef POSEWEAVER_VERSION
+constexpr const char* kAppVersion = POSEWEAVER_VERSION;
 #else
 constexpr const char* kAppVersion = "dev";
 #endif
 constexpr size_t kMaxRecent = 10;
 
+// Keep the original directory so settings and session recovery survive the rename.
 fs::path configDir() {
     fs::path dir;
 #ifdef _WIN32
@@ -203,12 +206,27 @@ void drawBanner(ImDrawList* dl, ImVec2 p0, ImVec2 size, float t) {
 
 // ---------------------------------------------------------------- settings / session
 
+std::string Editor::configFile(const char* name) const {
+    const fs::path dir = settingsDirectory_.empty() ? configDir() : fs::u8path(settingsDirectory_);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    return (dir / name).u8string();
+}
+
 void Editor::loadSettings() {
-    std::ifstream f(configDir() / "settings.json");
+    std::ifstream f(fs::u8path(configFile("settings.json")));
     if (!f) return;
     nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
     if (!j.is_object()) return;
-    settings_.showSplash = j.value("showSplash", true);
+    if (j.contains("showSplash") && j["showSplash"].is_boolean()) settings_.showSplash = j["showSplash"];
+    if (j.contains("collectResources") && j["collectResources"].is_boolean()) settings_.collectResources = j["collectResources"];
+    if (j.contains("effectsPreview") && j["effectsPreview"].is_string()) settings_.effectsGpu = j["effectsPreview"] == "gpu";
+    if (j.contains("undoMemoryMiB") && j["undoMemoryMiB"].is_number_integer()) {
+        auto value = j["undoMemoryMiB"].get<int64_t>();
+        if (value >= 16 && value <= 1024) settings_.undoMemoryMiB = (int)value;
+    }
+    if (j.contains("language") && j["language"].is_string()) settings_.language = j["language"];
+    setLanguage(settings_.language, false);
     if (j.contains("recent") && j["recent"].is_array())
         for (auto& r : j["recent"])
             if (r.is_string()) settings_.recent.push_back(r.get<std::string>());
@@ -217,9 +235,15 @@ void Editor::loadSettings() {
 void Editor::saveSettings() {
     nlohmann::json j;
     j["showSplash"] = settings_.showSplash;
+    j["collectResources"] = settings_.collectResources;
+    j["effectsPreview"] = settings_.effectsGpu ? "gpu" : "cpu";
+    j["undoMemoryMiB"] = settings_.undoMemoryMiB;
+    j["language"] = settings_.language;
     j["recent"] = settings_.recent;
-    std::ofstream f(configDir() / "settings.json");
-    f << j.dump(2);
+    std::string error;
+    if (!writeFileAtomic(configFile("settings.json"), j.dump(2), &error))
+        reportIssue("SETTINGS_FAILED", error, Severity::Warning, configFile("settings.json"));
+    else dismissIssue("SETTINGS_FAILED");
 }
 
 void Editor::addRecent(const std::string& path) {
@@ -234,7 +258,7 @@ void Editor::addRecent(const std::string& path) {
     saveSettings();
 }
 
-std::string Editor::sessionPath() const { return (configDir() / "last_session.rig.json").u8string(); }
+std::string Editor::sessionPath() const { return configFile("last_session.rig.json"); }
 
 std::string Editor::findSample(const std::string& name) const {
     const fs::path exe = exeDir();
@@ -248,14 +272,36 @@ std::string Editor::findSample(const std::string& name) const {
 }
 
 void Editor::saveSession() {
+    if (dirty_) return;  // Explicitly discarded edits must not become the next normal session.
     if (sk_.bones.size() <= 1 && sk_.slots.empty() && sk_.animations.empty()) return;  // nothing worth restoring
     std::string err;
-    saveFile(sessionPath(), sk_, &err);  // image paths are absolute in memory
+    if (!saveFile(sessionPath(), sk_, &err)) reportIssue("SESSION_FAILED", err, Severity::Warning, sessionPath());
+    else dismissIssue("SESSION_FAILED");
+}
+
+void Editor::setLanguage(const std::string& code, bool remember) {
+    i18n::setLanguage(code.empty() ? i18n::systemLanguage() : i18n::fromCode(code));
+    if (remember) {
+        settings_.language = code;
+        saveSettings();
+    }
+}
+
+void Editor::drawLanguageMenu() {
+    if (!ImGui::BeginMenu("语言 / Language")) return;
+    const bool follow = settings_.language.empty();
+    const bool en = i18n::language() == i18n::Lang::En;
+    if (ImGui::MenuItem("中文", nullptr, !follow && !en)) setLanguage("zh", true);
+    if (ImGui::MenuItem("English", nullptr, !follow && en)) setLanguage("en", true);
+    ImGui::Separator();
+    if (ImGui::MenuItem(tr("跟随系统"), nullptr, follow)) setLanguage("", true);
+    ImGui::EndMenu();
 }
 
 // ---------------------------------------------------------------- splash
 
 void Editor::drawSplash() {
+    if (recoveryAvailable_) return;
     if (splashRequest_) {
         ImGui::OpenPopup("##splash");
         splashRequest_ = false;
@@ -284,13 +330,12 @@ void Editor::drawSplash() {
     ImVec2 logo = p0 + ImVec2(pad + titleSize * 0.5f, pad + titleSize * 0.55f);
     dl->AddCircleFilled(logo, titleSize * 0.55f, IM_COL32(255, 255, 255, 235));
     drawIcon(dl, Icon::Bone, logo, titleSize * 0.8f, theme::kAccent);
-    dl->AddText(theme::largeFont(), titleSize, p0 + ImVec2(pad + titleSize * 1.25f, pad), IM_COL32(255, 255, 255, 255), "RigEditor");
-    dl->AddText(p0 + ImVec2(pad + titleSize * 1.3f, pad + titleSize * 1.12f), IM_COL32(220, 225, 240, 200), "2D 骨骼动画编辑器");
+    dl->AddText(theme::largeFont(), titleSize, p0 + ImVec2(pad + titleSize * 1.25f, pad), IM_COL32(255, 255, 255, 255), "Poseweaver");
+    dl->AddText(p0 + ImVec2(pad + titleSize * 1.3f, pad + titleSize * 1.12f), IM_COL32(220, 225, 240, 200), tr("2D 骨骼动画编辑器"));
     char version[32];
     std::snprintf(version, sizeof(version), "v%s", kAppVersion);
     ImVec2 vs = ImGui::CalcTextSize(version);
     dl->AddText(p0 + ImVec2(width - vs.x - fs, fs * 0.8f), IM_COL32(255, 255, 255, 220), version);
-    dl->AddText(p0 + ImVec2(fs, bannerSize.y - fs * 1.7f), IM_COL32(255, 255, 255, 150), "C++17 · Dear ImGui · OpenGL");
     dl->PopClipRect();
     ImGui::Dummy(bannerSize);
 
@@ -300,29 +345,29 @@ void Editor::drawSplash() {
     bool close = false;
     if (ImGui::BeginTable("##splashTop", 2, ImGuiTableFlags_SizingStretchSame, tableSize)) {
         ImGui::TableNextColumn();
-        ImGui::TextDisabled("新建");
-        if (splashRow("new", Glyph::NewDoc, "空白工程")) {
+        ImGui::TextDisabled(tr("新建"));
+        if (splashRow("new", Glyph::NewDoc, tr("空白工程"))) {
             newProject();
             close = true;
         }
-        if (splashRow("img", Glyph::Image, "从图片新建...")) {
-            newProject();
-            importImageDialog();
+        if (splashRow("img", Glyph::Image, tr("从图片新建..."))) {
+            newFromImageDialog();
             close = true;
         }
-        if (splashRow("psd", Glyph::Psd, "从 PSD 新建...")) {
-            newProject();
-            io_.open = IoState::Psd;
+        if (splashRow("psd", Glyph::Psd, tr("从 PSD 新建..."))) {
+            newFromPsd();
             close = true;
         }
         std::string sample = findSample("arm.png");
-        if (splashRow("demo", Glyph::Sample, "示例：挥手的手臂", !sample.empty(), sample.empty() ? "找不到 samples/arm.png" : sample.c_str())) {
+        const auto robot = findSample("robot-starter.rig.json");
+        if (splashRow("robot",Glyph::Sample,tr("完整示例：机器人"),!robot.empty())) { openProject(robot); close = true; }
+        if (splashRow("demo", Glyph::Sample, tr("示例：挥手的手臂"), !sample.empty(), sample.empty() ? tr("找不到 samples/arm.png") : sample.c_str())) {
             buildDemo(sample, 0.0f, "");
             close = true;
         }
 
         ImGui::TableNextColumn();
-        ImGui::TextDisabled("最近打开的文件");
+        ImGui::TextDisabled(tr("最近打开的文件"));
         int shown = 0;
         std::string openPath;
         for (const std::string& path : settings_.recent) {
@@ -332,7 +377,7 @@ void Editor::drawSplash() {
             if (splashRow(path.c_str(), Glyph::Doc, name.c_str(), true, path.c_str())) openPath = path;
             ++shown;
         }
-        if (!shown) ImGui::TextDisabled("  （还没有）");
+        if (!shown) ImGui::TextDisabled(tr("  （还没有）"));
         if (!openPath.empty()) {
             openProject(openPath);
             close = true;
@@ -342,29 +387,30 @@ void Editor::drawSplash() {
     ImGui::Dummy(ImVec2(0, fs * 0.4f));
     if (ImGui::BeginTable("##splashBottom", 2, ImGuiTableFlags_SizingStretchSame, tableSize)) {
         ImGui::TableNextColumn();
-        if (splashRow("open", Glyph::Folder, "打开...")) {
+        if (splashRow("open", Glyph::Folder, tr("打开..."))) {
             close = true;
             openProjectDialog();
         }
         std::error_code ec;
         bool hasSession = fs::exists(fs::u8path(sessionPath()), ec);
-        if (splashRow("restore", Glyph::Clock, "恢复上次的会话", hasSession, hasSession ? "打开上次退出时的工程状态" : "还没有上次会话的记录")) {
-            if (openProject(sessionPath())) {
-                projectPath_.clear();  // a recovered copy: Save asks where to keep it
-                dirty_ = true;
-                setStatus("已恢复上次的会话");
-            }
+        if (splashRow("restore", Glyph::Clock, tr("恢复上次的会话"), hasSession, hasSession ? tr("打开上次退出时的工程状态") : tr("还没有上次会话的记录"))) {
+            restoreSession();
             close = true;
         }
         ImGui::TableNextColumn();
-        if (splashRow("keys", Glyph::Keyboard, "快捷键")) {
+        if (splashRow("keys", Glyph::Keyboard, tr("快捷键"))) {
             showShortcuts_ = true;
             close = true;
         }
-        if (ImGui::Checkbox("启动时显示此页", &settings_.showSplash)) saveSettings();
+        if (ImGui::Checkbox(tr("启动时显示此页"), &settings_.showSplash)) saveSettings();
+        // Language names stay in their own language so either can be found.
+        const bool en = i18n::language() == i18n::Lang::En;
+        if (ImGui::RadioButton("中文", !en)) setLanguage("zh", true);
+        ImGui::SameLine();
+        if (ImGui::RadioButton("English", en)) setLanguage("en", true);
         ImGui::EndTable();
     }
-    if (dirty_) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "当前工程有未保存的修改，新建或打开会丢弃它们。");
+    if (dirty_) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), tr("当前工程有未保存的修改，切换工程前会询问。"));
     ImGui::Unindent(pad);
     ImGui::Dummy(ImVec2(0, fs * 0.6f));
     if (close) ImGui::CloseCurrentPopup();
@@ -374,24 +420,24 @@ void Editor::drawSplash() {
 void Editor::drawShortcuts() {
     if (!showShortcuts_) return;
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (!ImGui::Begin("快捷键###Shortcuts", &showShortcuts_, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking |
+    if (!ImGui::Begin(tr("快捷键###Shortcuts"), &showShortcuts_, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking |
                                                                 ImGuiWindowFlags_NoSavedSettings)) {
         ImGui::End();
         return;
     }
-    static const char* rows[][2] = {
-        {"Tab", "切换 Setup / Animate 模式"},
-        {"C / V / X / Z", "旋转 / 移动 / 缩放 / 斜切"},
-        {"B / N / G / M", "姿势 / 建骨骼 / 权重 / 网格（Animate 下为变形）"},
-        {"右键拖动 / 滚轮", "平移 / 缩放视图；右键单击切回上一个工具"},
-        {"F / Ctrl+F", "适配骨架 / 100% 缩放"},
-        {"Esc / Del", "取消选择 / 删除所选"},
-        {"空格", "播放 / 暂停（Animate）"},
-        {"K", "为所有改动打关键帧"},
-        {"← / →", "上一帧 / 下一帧"},
-        {"Ctrl+Z / Ctrl+Y", "撤销 / 重做"},
-        {"Ctrl+N / O / S", "新建 / 打开 / 保存（Ctrl+Shift+S 另存为）"},
-        {"Ctrl+I", "导入图片（也可把 PNG / PSD 拖进窗口）"},
+    const char* rows[][2] = {
+        {"Tab", tr("切换 Setup / Animate 模式")},
+        {"C / V / X / Z", tr("旋转 / 移动 / 缩放 / 斜切")},
+        {"B / N / G / M", tr("姿势 / 建骨骼 / 权重 / 网格（Animate 下为变形）")},
+        {tr("右键拖动 / 滚轮"), tr("平移 / 缩放视图；右键单击切回上一个工具")},
+        {"F / Ctrl+F", tr("适配骨架 / 100% 缩放")},
+        {"Esc / Del", tr("取消选择 / 删除所选")},
+        {tr("空格"), tr("播放 / 暂停（Animate）")},
+        {"K", tr("为所有改动打关键帧")},
+        {"← / →", tr("上一帧 / 下一帧")},
+        {"Ctrl+Z / Ctrl+Y", tr("撤销 / 重做")},
+        {"Ctrl+N / O / S", tr("新建 / 打开 / 保存（Ctrl+Shift+S 另存为）")},
+        {"Ctrl+I", tr("导入图片（也可把 PNG / PSD 拖进窗口）")},
     };
     if (ImGui::BeginTable("##keys", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
         for (auto& r : rows) {

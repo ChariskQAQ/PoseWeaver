@@ -1,0 +1,1 @@
+GPU=NVIDIA Corporation; renderer=NVIDIA GeForce RTX 5070 Laptop GPU/PCIe/SSE2; fixture=synthetic; bones=513; slots=512; textures=8; source_RGBA_MiB=128.0; hidden UI CPU build, GPU submission/presentation excluded

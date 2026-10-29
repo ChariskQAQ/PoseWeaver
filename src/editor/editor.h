@@ -1,13 +1,22 @@
 #pragma once
 #include "core/anim_state.h"
 #include "core/constraints.h"
+#include "core/diagnostics.h"
 #include "core/pose.h"
+#include "core/resource_relink.h"
 #include "platform/audio.h"
 #include "platform/texture.h"
+#include "platform/gpu_effects.h"
+#include "editor/engine_export.h"
+#include "editor/image_export.h"
+#include "editor/export_transaction.h"
 
 #include <imgui.h>
 
 #include <map>
+#include <functional>
+#include <cstdint>
+#include <optional>
 #include <memory>
 #include <set>
 #include <string>
@@ -59,7 +68,7 @@ enum class KeyState { None, Changed, Keyed };
 
 class Editor {
 public:
-    Editor();
+    explicit Editor(const std::string& settingsDirectory = {});
     ~Editor();
 
     void frame(float dt);      // build all UI for one frame
@@ -73,6 +82,8 @@ public:
     bool splashEnabled() const { return settings_.showSplash; }
     // On quit: keeps the current skeleton as the "restore last session" file.
     void saveSession();
+    // UI language: "zh", "en" or "" (follow the system). `remember` stores it in the settings.
+    void setLanguage(const std::string& code, bool remember);
     // Builds a two-bone skinned arm with a "wave" animation from `imagePath`.
     // scenario: "" (Animate at `time`), "weights", "mesh" (mesh tool), "clip" (adds a clipping slot).
     void buildDemo(const std::string& imagePath, float time, const std::string& scenario);
@@ -81,6 +92,7 @@ public:
     // png, sheet, gif, mp4, webm (export) or merge, psd (import).
     bool runExport(const std::string& type, const std::string& path);
     const std::string& status() const { return status_; }
+    void openIssues() { showIssues_ = true; issuesDirty_ = true; focusIssues_ = 2; }
     void focusGraph() {
         focusGraph_ = 3;
         graphCurve_ = 0;
@@ -88,18 +100,112 @@ public:
     }
 
 private:
+    friend struct EditorTestAccess;
     // --- document ---
     rig::Skeleton sk_;
     std::vector<Texture> textures_;  // parallel to sk_.images
     std::string projectPath_;        // UTF-8, empty = never saved
     bool dirty_ = false;
+    uint64_t historyPosition_ = 0, nextHistoryPosition_ = 1;
+    std::optional<uint64_t> savedPosition_{0};
+    std::string settingsDirectory_;
+    std::function<bool()> pendingDocumentChange_;
+    bool pendingPreservesRecovery_ = false, pendingIsClose_ = false;
+    enum class ChangeDecision { Save, Discard, Cancel };
+    bool requestDocumentChange(std::function<bool()> change, bool preserveRecovery = false, bool closing = false);
+    bool resolveDocumentChange(ChangeDecision decision);
+    void resetProject();
+    bool openProjectNow(const std::string& path);
+    bool saveProjectTo(const std::string& path, bool collectResources = false);
+    bool commitDocumentChange(rig::Skeleton document);
+    void markSaved();
+    void markUnsaved();
+    bool relinkImage(int image, const std::string& path);
+    bool showResourceRelink_ = false;
+    std::vector<rig::ResourceMatch> resourceMatches_;
+    std::string resourceRelinkDirectory_;
+    struct ResourceScanJob {
+        rig::ResourceSearchProgress progress;
+        std::future<std::vector<rig::ResourceMatch>> result;
+    };
+    std::unique_ptr<ResourceScanJob> resourceScan_;
+    std::string resourceScanNotice_;
+    bool scanResourceMatches(const std::string& directory);
+    void pollResourceScan();
+    void resetResourceScan();
+    bool applyResourceMatches();
+    void drawResourceRelink();
+    bool showExportRecovery_ = false;
+    std::vector<ExportRecovery> exportRecoveries_;
+    std::future<std::string> exportRecoveryTask_;
+    std::string exportRecoveryEntry_;
+    void refreshExportRecoveries();
+    bool startExportRecovery(int index);
+    void pollExportRecovery();
+    void drawExportRecovery();
+    bool setSlotBlend(int slot, rig::BlendMode blend);
+    void buildDemoNow(const std::string& imagePath, float time, const std::string& scenario);
+    void newFromImageDialog();
+    void newFromPsd();
+    void restoreSession();
+
+    // Recoverable snapshots are separate from the user's saved project.
+    bool recoveryPending_ = false, recoveryOwned_ = false, recoveryAvailable_ = false;
+    bool showRecoveryDialog_ = false;
+    float recoveryElapsed_ = 0;
+    std::string recoveryError_;
+    std::string configFile(const char* name) const;
+    std::string recoveryPath() const;
+    bool saveRecovery();
+    bool restoreRecovery();
+    void clearRecovery();
+    void updateRecovery(float dt, bool editing);
+    void drawRecoveryDialog();
+
+    bool showIssues_ = false, issuesDirty_ = true;
+    float issuesRefreshIn_ = 0;
+    int issueFilter_ = 0;
+    int focusIssues_ = 0;
+    std::string selectedIssueKey_;
+    std::vector<rig::Diagnostic> issues_, sessionIssues_;
+    void refreshIssues();
+    void drawIssues();
+    bool canFocusIssue(const rig::Diagnostic& issue) const;
+    bool focusIssue(const rig::Diagnostic& issue);
+    void reportIssue(rig::Diagnostic issue);
+    void reportIssue(const std::string& code, const std::string& detail, rig::Severity severity = rig::Severity::Error,
+                     const std::string& path = {});
+    bool failOperation(const std::string& code, const std::string& message, const std::string& path = {},
+                       rig::IssueTarget target = rig::IssueTarget::File, int index = -1, int sub = -1);
+    void dismissIssue(const std::string& code);
+    bool checkExportResources();
 
     // --- undo ---
-    std::vector<std::string> undo_, redo_;
+    struct UndoEntry {
+        std::string snapshot;
+        uint64_t position = 0;
+        enum Kind { Document, Bone, Name, Attachment } kind = Document;
+        int index = -1, slot = -1, skin = -1;
+        Selection::Kind nameKind = Selection::None;
+        rig::Bone bone;
+        rig::Attachment attachment;
+        std::string name;
+        uint64_t memoryBytes() const;
+    };
+    std::vector<UndoEntry> undo_, redo_;
     void checkpoint();  // call before every document change
+    void checkpointBone(int bone);
+    void checkpointName();
+    void checkpointAttachment();
+    void pushCheckpoint(UndoEntry entry);
+    bool captureHistory(const UndoEntry& shape, UndoEntry& entry);
+    rig::Attachment* historyAttachment(const UndoEntry& entry);
+    std::string* historyName(const UndoEntry& entry);
     void undo();
     void redo();
-    void restore(const std::string& snapshot);
+    bool restore(const UndoEntry& entry);
+    uint64_t undoMemoryBytes() const;
+    void trimUndoHistory(bool preferUndo = true);
 
     // --- editing state ---
     Mode mode_ = Mode::Setup;
@@ -213,23 +319,14 @@ private:
     bool showDemo_ = false;
 
     // --- import / export dialogs ---
-    struct IoState {
-        enum Dialog { None, Data, Atlas, Images, Psd } open = None, openPopup = None;
+    struct IoState : ImageExportOptions {
+        enum Dialog { None, Data, Atlas, Images, Psd, Engine } open = None, openPopup = None;
         bool dataBinary = false, dataPretty = true;
         int dataDecimals = -1;
         int atlasMaxSize = 2048, atlasPadding = 2;
         bool atlasTrim = true, atlasRotate = false, atlasPow2 = false, atlasAutoScale = false;
         float atlasScale = 1.0f;
-        int imageType = 0;  // 0 png sequence, 1 sprite sheet, 2 gif, 3 mp4, 4 webm, 5 jpg sequence, 6 avi, 7 mov
-        int jpgQuality = 90;
-        int imageAnim = -1;
-        float imageScale = 1.0f, imageFps = 30;
-        int imageSupersample = 2, imagePadding = 8;
-        bool imageBackground = false;
-        float imageBgColor[3] = {0.2f, 0.2f, 0.22f};
-        std::string ffmpegPath = "ffmpeg";
         bool psdIncludeHidden = true;
-        bool videoAudio = true;
     } io_;
     void drawIoDialogs();
     bool importMergePath(const std::string& path);
@@ -237,7 +334,55 @@ private:
     bool exportDataPath(const std::string& path);
     bool exportAtlasPath(const std::string& path);
     bool exportImagesPath(const std::string& path);
+    ImageExportOptions imageOptions() const;
+    std::unique_ptr<ImageExportJob> imageJob_;
+    bool startImageExport(const std::string& path, bool estimate = false);
+    std::string imageOutputPath_;
+    ImageExportResult imageBudget_;
+    ImageExportOptions imageBudgetOptions_;
+    uint64_t imageBudgetHistory_ = UINT64_MAX;
+    std::vector<int> imageBudgetSkins_;
+    bool imageBudgetPhysics_ = false;
+    void saveImageExportSettings();
+    void loadImageExportSettings();
+    bool imageSettingsDirty_ = false;
+    bool imageSettingsReadOnly_ = false;
+    float imageSettingsDelay_ = 0;
+    void pollImageExport();
+    void resetImageExport();
+    bool finishImageExport(const ImageExportResult& result, const std::string& path, bool video);
+    void drawImageExportProgress();
+    bool exportEnginePath(const std::string& path);
+    bool exportRuntimePath(const std::string& path);
+    EngineExportOptions engineOptions_;
+    EngineExportBudget engineBudget_;
+    std::unique_ptr<EngineExportJob> engineJob_;
+    std::string engineNotice_;
+    bool engineNoticeError_ = false, engineSettingsDirty_ = false;
+    float engineSettingsDelay_ = 0;
+    void syncEngineClips();
+    void loadEngineExportSettings();
+    void saveEngineExportSettings();
+    void resetEngineExport();
+    bool startEngineExport(bool estimate);
+    void pollEngineExport();
+    bool finishEngineExport(const EngineExportResult& result, bool estimate, const std::string& path);
+    void drawEngineExportDialog();
     bool resetLayout_ = false;
+    bool showEffects_ = false, effectsEditing_ = false, effectsCacheValid_ = false;
+    int effectsColor_ = 0;
+    Texture effectsTexture_;
+    GpuEffects effectsGpu_;
+    bool effectsUsingGpu_ = false;
+    std::string effectsGpuError_;
+    std::vector<float> effectsPoseKey_;
+    rig::RenderEffects effectsCached_;
+    uint64_t effectsHistory_ = 0;
+    rig::Vec2 effectsLo_, effectsHi_;
+    bool setRenderEffects(const rig::RenderEffects& effects, bool continuous = false);
+    void setEffectsGpu(bool enabled);
+    void drawRenderEffects();
+    bool drawEffectsPreview(ImDrawList* list);
     rig::PhysicsState physics_;
     std::unique_ptr<AudioPlayer> audio_;
     bool audioOn_ = true;
@@ -263,6 +408,10 @@ private:
     struct AppSettings {
         std::vector<std::string> recent;  // most recent first
         bool showSplash = true;
+        bool collectResources = false;
+        bool effectsGpu = false;
+        int undoMemoryMiB = 128;
+        std::string language;  // "zh" / "en", empty = follow the system
     } settings_;
     bool splashRequest_ = false, showShortcuts_ = false;
     void loadSettings();
@@ -272,6 +421,7 @@ private:
     std::string findSample(const std::string& name) const;
     void drawSplash();
     void drawShortcuts();
+    void drawLanguageMenu();  // items for the View menu
     // Mix preview (Animate mode): an AnimationState with up to kMixTracks tracks drives the viewport.
     static constexpr int kMixTracks = 4;
     rig::AnimationState mixState_;

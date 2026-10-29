@@ -1,10 +1,12 @@
 // Overlays drawn on top of the viewport: mode label, zoom controls and the main toolbar.
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "editor/icons.h"
 #include "editor/theme.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 
 using namespace rig;
@@ -51,13 +53,13 @@ void Editor::drawModeLabel() {
     drawIcon(dl, mode_ == Mode::Setup ? Icon::Skeleton : Icon::Animation, p + ImVec2(h * 0.5f, h * 0.5f), h * 0.8f, col);
     dl->AddText(theme::largeFont(), ImGui::GetFontSize(), p + ImVec2(h + 6, 0), col, label);
     ImGui::PopFont();
-    if (hovered) ImGui::SetTooltip("点击切换 Setup / Animate 模式 (Tab)");
+    if (hovered) ImGui::SetTooltip(tr("点击切换 Setup / Animate 模式 (Tab)"));
     if (clicked) setMode(mode_ == Mode::Setup ? Mode::Animate : Mode::Setup);
     if (mode_ == Mode::Animate && mixActive_) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 0.9f), "混合预览中（%s）", mixPlaying_ ? "播放" : "暂停");
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 0.9f), tr("混合预览中（%s）"), mixPlaying_ ? tr("播放") : tr("暂停"));
     } else if (mode_ == Mode::Animate) {
         Animation* an = currentAnimation();
-        ImGui::TextColored(ImVec4(1, 1, 1, 0.7f), "%s   第 %d 帧", an ? an->name.c_str() : "(无动画)",
+        ImGui::TextColored(ImVec4(1, 1, 1, 0.7f), tr("%s   第 %d 帧"), an ? an->name.c_str() : tr("(无动画)"),
                            (int)std::round(time_ * fps_));
     }
     ImGui::EndChild();
@@ -77,9 +79,9 @@ void Editor::drawZoomControls() {
     if (ImGui::VSliderFloat("##z", ImVec2(fh * 1.15f, h - 2 * fh - 18), &logZoom, -4.0f, 5.0f, ""))
         zoomTo(std::pow(2.0f, logZoom));
     ImGui::PopStyleVar();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("缩放 %.0f%%", zoom_ * 100);
-    if (iconOnlyButton("100", Icon::Zoom100, false, "缩放到 100% (Ctrl+F)")) zoomTo(1.0f);
-    if (iconOnlyButton("fit", Icon::ZoomFit, false, "适配骨架 (F)")) frameAll();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("缩放 %.0f%%"), zoom_ * 100);
+    if (iconOnlyButton("100", Icon::Zoom100, false, tr("缩放到 100% (Ctrl+F)"))) zoomTo(1.0f);
+    if (iconOnlyButton("fit", Icon::ZoomFit, false, tr("适配骨架 (F)"))) frameAll();
     endGroup();
 }
 
@@ -105,18 +107,18 @@ void Editor::drawMainToolbar() {
 
     // ---- tools ----
     if (beginGroup("##tools", ImVec2(x, y), h)) {
-        float w = ImGui::CalcTextSize("建骨骼 N").x + fh + 16;
-        if (iconButton("pose", Icon::Pose, "姿势 B", tool_ == Tool::Pose, w)) setTool(Tool::Pose);
+        float w = ImGui::CalcTextSize(tr("建骨骼 N")).x + fh + 16;
+        if (iconButton("pose", Icon::Pose, tr("姿势 B"), tool_ == Tool::Pose, w)) setTool(Tool::Pose);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("拖骨骼原点移动，拖骨骼其它位置让它指向鼠标\nCtrl+点击多选一条骨骼链，拖其中的骨骼用 IK 摆整条链");
-        if (iconButton("weights", Icon::Weights, "权重 G", tool_ == Tool::Weights, w, !animate)) setTool(Tool::Weights);
-        if (iconButton("create", Icon::Create, "建骨骼 N", tool_ == Tool::CreateBone, w, !animate)) setTool(Tool::CreateBone);
+            ImGui::SetTooltip(tr("拖骨骼原点移动，拖骨骼其它位置让它指向鼠标\nCtrl+点击多选一条骨骼链，拖其中的骨骼用 IK 摆整条链"));
+        if (iconButton("weights", Icon::Weights, tr("权重 G"), tool_ == Tool::Weights, w, !animate)) setTool(Tool::Weights);
+        if (iconButton("create", Icon::Create, tr("建骨骼 N"), tool_ == Tool::CreateBone, w, !animate)) setTool(Tool::CreateBone);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("先选父骨骼，再单击或拖动创建子骨骼；Shift 保持父骨骼选中");
-        if (iconButton("mesh", animate ? Icon::Deform : Icon::MeshTool, animate ? "变形 M" : "网格 M", tool_ == Tool::MeshEdit, w))
+            ImGui::SetTooltip(tr("先选父骨骼，再单击或拖动创建子骨骼；Shift 保持父骨骼选中"));
+        if (iconButton("mesh", animate ? Icon::Deform : Icon::MeshTool, animate ? tr("变形 M") : tr("网格 M"), tool_ == Tool::MeshEdit, w))
             setTool(Tool::MeshEdit);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(animate ? "拖动网格顶点，打变形关键帧" : "拖动顶点，Alt+点击加顶点，Del 删除，空白处框选");
+            ImGui::SetTooltip(animate ? tr("拖动网格顶点，打变形关键帧") : tr("拖动顶点，Alt+点击加顶点，Del 删除，空白处框选"));
     }
     endGroup();
     nextX();
@@ -145,6 +147,10 @@ void Editor::drawMainToolbar() {
             transformBone(tv.bone, t, rot, trans, scale, shear);
         }
     };
+    auto checkpointTransform = [&] {
+        if (tv.isAttachment) checkpointAttachment();
+        else checkpointBone(tv.bone);
+    };
     auto keyColor = [&](Channel ch) {
         switch (boneKeyState(tv.bone, ch)) {
         case KeyState::Changed: return theme::kKeyChanged;
@@ -154,7 +160,7 @@ void Editor::drawMainToolbar() {
     };
 
     if (beginGroup("##transform", ImVec2(x, y), h)) {
-        float btnW = ImGui::CalcTextSize("旋转 C").x + fh + 16;
+        float btnW = ImGui::CalcTextSize(tr("旋转 C")).x + fh + 16;
         float fieldW = ImGui::GetFontSize() * 4.6f;
         ImGui::BeginDisabled(!tv.valid);
 
@@ -172,14 +178,18 @@ void Editor::drawMainToolbar() {
             }
             ImGui::SameLine();
             KeyState st = boneKeyState(tv.bone, ch);
-            std::string tip = std::string(st == KeyState::Keyed ? "当前帧已有" : st == KeyState::Changed ? "有未打帧的" : "为") +
-                              name + (st == KeyState::None ? "打关键帧" : st == KeyState::Changed ? "改动，点击打帧" : "关键帧");
-            if (keyButton(id, keyColor(ch), tip.c_str()))
+            char tip[160];
+            std::snprintf(tip, sizeof(tip),
+                          st == KeyState::Keyed     ? tr("当前帧已有%s关键帧")
+                          : st == KeyState::Changed ? tr("有未打帧的%s改动，点击打帧")
+                                                    : tr("为%s打关键帧"),
+                          name);
+            if (keyButton(id, keyColor(ch), tip))
                 keyBone(tv.bone, ch == Channel::Rotate, ch == Channel::Translate, ch == Channel::Scale, ch == Channel::Shear);
         };
 
         // Rotate
-        row("rot", Icon::Rotate, "旋转 C", Tool::Rotate);
+        row("rot", Icon::Rotate, tr("旋转 C"), Tool::Rotate);
         {
             float parentRot = tv.parentWorld.rotationDeg();
             bool flipped = tv.parentWorld.det() < 0;
@@ -187,7 +197,7 @@ void Editor::drawMainToolbar() {
             if (axes_ == Axes::World) v = std::fmod(tv.world.rotationDeg() + 360.0f, 360.0f);
             ImGui::SetNextItemWidth(fieldW * 2 + 3);
             bool changed = ImGui::DragFloat("##rotv", &v, 0.5f, 0, 0, "%.2f°");
-            if (ImGui::IsItemActivated()) checkpoint();
+            if (ImGui::IsItemActivated()) checkpointTransform();
             if (changed && tv.valid) {
                 Transform t = tv.local;
                 t.rotation = axes_ == Axes::World ? (flipped ? parentRot - v : v - parentRot) : v;
@@ -195,10 +205,10 @@ void Editor::drawMainToolbar() {
                 apply(t, true, false, false);
             }
         }
-        keyCell("krot", Channel::Rotate, "旋转");
+        keyCell("krot", Channel::Rotate, tr("旋转"));
 
         // Translate
-        row("trans", Icon::Translate, "移动 V", Tool::Translate);
+        row("trans", Icon::Translate, tr("移动 V"), Tool::Translate);
         {
             Vec2 v{tv.local.x, tv.local.y};
             Affine localRot = Affine::fromTRS(0, 0, tv.local.rotation, 1, 1);
@@ -207,7 +217,7 @@ void Editor::drawMainToolbar() {
             float xy[2] = {v.x, v.y};
             ImGui::SetNextItemWidth(fieldW * 2 + 3);
             bool changed = ImGui::DragFloat2("##transv", xy, 0.5f, 0, 0, "%.1f");
-            if (ImGui::IsItemActivated()) checkpoint();
+            if (ImGui::IsItemActivated()) checkpointTransform();
             if (changed && tv.valid) {
                 Vec2 n{xy[0], xy[1]};
                 if (axes_ == Axes::Local) n = localRot.applyVector(n);
@@ -218,10 +228,10 @@ void Editor::drawMainToolbar() {
                 apply(t, false, true, false);
             }
         }
-        keyCell("ktrans", Channel::Translate, "移动");
+        keyCell("ktrans", Channel::Translate, tr("移动"));
 
         // Scale
-        row("scale", Icon::Scale, "缩放 X", Tool::Scale);
+        row("scale", Icon::Scale, tr("缩放 X"), Tool::Scale);
         {
             float sx = tv.local.scaleX, sy = tv.local.scaleY;
             if (axes_ == Axes::World) {
@@ -232,7 +242,7 @@ void Editor::drawMainToolbar() {
             float xy[2] = {sx, sy};
             ImGui::SetNextItemWidth(fieldW * 2 + 3);
             bool changed = ImGui::DragFloat2("##scalev", xy, 0.01f, 0, 0, "%.3f");
-            if (ImGui::IsItemActivated()) checkpoint();
+            if (ImGui::IsItemActivated()) checkpointTransform();
             if (changed && tv.valid) {
                 Transform t = tv.local;
                 // World scale can't be stored directly: apply the change as a ratio to local scale.
@@ -242,15 +252,15 @@ void Editor::drawMainToolbar() {
                 apply(t, false, false, true);
             }
         }
-        keyCell("kscale", Channel::Scale, "缩放");
+        keyCell("kscale", Channel::Scale, tr("缩放"));
 
         // Shear
-        row("shear", Icon::Shear, "斜切 Z", Tool::Shear);
+        row("shear", Icon::Shear, tr("斜切 Z"), Tool::Shear);
         {
             float xy[2] = {tv.local.shearX, tv.local.shearY};
             ImGui::SetNextItemWidth(fieldW * 2 + 3);
             bool changed = ImGui::DragFloat2("##shearv", xy, 0.5f, 0, 0, "%.1f°");
-            if (ImGui::IsItemActivated()) checkpoint();
+            if (ImGui::IsItemActivated()) checkpointTransform();
             if (changed && tv.valid) {
                 Transform t = tv.local;
                 t.shearX = xy[0];
@@ -258,7 +268,7 @@ void Editor::drawMainToolbar() {
                 apply(t, false, false, false, true);
             }
         }
-        keyCell("kshear", Channel::Shear, "斜切");
+        keyCell("kshear", Channel::Shear, tr("斜切"));
 
         // Length (Setup mode bones) or bone name, so the 4th row is never empty.
         ImGui::EndDisabled();
@@ -267,11 +277,11 @@ void Editor::drawMainToolbar() {
         if (tv.valid && !tv.isAttachment && mode_ == Mode::Setup) {
             float len = sk_.bones[tv.bone].length;
             ImGui::SetNextItemWidth(fieldW * 2 + 3);
-            bool changed = ImGui::DragFloat("##len", &len, 0.5f, 0, 100000, "长度 %.1f");
-            if (ImGui::IsItemActivated()) checkpoint();
+            bool changed = ImGui::DragFloat("##len", &len, 0.5f, 0, 100000, tr("长度 %.1f"));
+            if (ImGui::IsItemActivated()) checkpointTransform();
             if (changed) sk_.bones[tv.bone].length = std::max(0.0f, len);
         } else {
-            const char* what = !tv.valid ? "未选择" : tv.isAttachment ? sk_.slots[sel_.slot].name.c_str()
+            const char* what = !tv.valid ? tr("未选择") : tv.isAttachment ? sk_.slots[sel_.slot].name.c_str()
                                                                        : sk_.bones[tv.bone].name.c_str();
             ImGui::TextDisabled("%s", what);
         }
@@ -281,46 +291,46 @@ void Editor::drawMainToolbar() {
 
     // ---- axes ----
     if (beginGroup("##axes", ImVec2(x, y), h)) {
-        float w = ImGui::CalcTextSize("父级").x + fh + 16;
-        if (iconButton("local", Icon::Local, "局部", axes_ == Axes::Local, w)) axes_ = Axes::Local;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("数值相对于自身坐标轴");
-        if (iconButton("parent", Icon::Parent, "父级", axes_ == Axes::Parent, w)) axes_ = Axes::Parent;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("数值相对于父骨骼坐标轴（存储方式）");
-        if (iconButton("world", Icon::World, "世界", axes_ == Axes::World, w)) axes_ = Axes::World;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("数值为世界坐标");
+        float w = ImGui::CalcTextSize(tr("父级")).x + fh + 16;
+        if (iconButton("local", Icon::Local, tr("局部"), axes_ == Axes::Local, w)) axes_ = Axes::Local;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("数值相对于自身坐标轴"));
+        if (iconButton("parent", Icon::Parent, tr("父级"), axes_ == Axes::Parent, w)) axes_ = Axes::Parent;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("数值相对于父骨骼坐标轴（存储方式）"));
+        if (iconButton("world", Icon::World, tr("世界"), axes_ == Axes::World, w)) axes_ = Axes::World;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("数值为世界坐标"));
     }
     endGroup();
     nextX();
 
     // ---- compensation ----
     if (beginGroup("##comp", ImVec2(x, y), h)) {
-        float w = ImGui::CalcTextSize("骨骼").x + fh + 16;
-        ImGui::TextDisabled("补偿");
-        if (iconButton("compb", Icon::Bone, "骨骼", compBones_, w)) compBones_ = !compBones_;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("调整骨骼时子骨骼保持原位（Animate 模式会给子骨骼打帧）");
-        if (iconButton("compi", Icon::Image, "图片", compImages_, w)) compImages_ = !compImages_;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("调整骨骼时附件保持原位（仅 Setup 模式、未绑定的附件）");
+        float w = ImGui::CalcTextSize(tr("骨骼")).x + fh + 16;
+        ImGui::TextDisabled(tr("补偿"));
+        if (iconButton("compb", Icon::Bone, tr("骨骼"), compBones_, w)) compBones_ = !compBones_;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("调整骨骼时子骨骼保持原位（Animate 模式会给子骨骼打帧）"));
+        if (iconButton("compi", Icon::Image, tr("图片"), compImages_, w)) compImages_ = !compImages_;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("调整骨骼时附件保持原位（仅 Setup 模式、未绑定的附件）"));
     }
     endGroup();
     nextX();
 
     // ---- keying ----
     if (beginGroup("##keying", ImVec2(x, y), h)) {
-        float w = ImGui::CalcTextSize("自动关键帧").x + fh + 16;
-        if (iconButton("autokey", Icon::AutoKey, "自动关键帧", autoKey_ && animate, w, animate)) autoKey_ = !autoKey_;
+        float w = ImGui::CalcTextSize(tr("自动关键帧")).x + fh + 16;
+        if (iconButton("autokey", Icon::AutoKey, tr("自动关键帧"), autoKey_ && animate, w, animate)) autoKey_ = !autoKey_;
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("开启：Animate 模式下的改动立即打关键帧\n关闭：改动先显示为橙色，按 K 或点钥匙打帧");
+            ImGui::SetTooltip(tr("开启：Animate 模式下的改动立即打关键帧\n关闭：改动先显示为橙色，按 K 或点钥匙打帧"));
         bool any = !pending_.empty();
-        if (iconButton("keyedit", Icon::Key, "打帧改动 K", false, w, animate && any)) keyPending();
+        if (iconButton("keyedit", Icon::Key, tr("打帧改动 K"), false, w, animate && any)) keyPending();
         ImGui::BeginDisabled(!animate);
-        if (iconButton("keyall", Icon::Key, "全部打帧", false, w, animate && sel_.bone >= 0) && sel_.bone >= 0)
+        if (iconButton("keyall", Icon::Key, tr("全部打帧"), false, w, animate && sel_.bone >= 0) && sel_.bone >= 0)
             keyBone(sel_.bone, true, true, true, true);
         ImGui::EndDisabled();
-        if (iconButton("physics", Icon::Physics, "物理预览", physicsOn_, w)) {
+        if (iconButton("physics", Icon::Physics, tr("物理预览"), physicsOn_, w)) {
             physicsOn_ = !physicsOn_;
             physics_.reset();
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("实时模拟物理约束（拖动骨骼、播放动画时生效）");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("实时模拟物理约束（拖动骨骼、播放动画时生效）"));
     }
     endGroup();
     nextX();
@@ -331,11 +341,11 @@ void Editor::drawMainToolbar() {
         if (ImGui::BeginTable("opts", 4, tf)) {
             float dot = ImGui::GetTextLineHeight();
             ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
-            ImGui::TableSetupColumn("可见", ImGuiTableColumnFlags_WidthFixed, dot * 1.6f);
-            ImGui::TableSetupColumn("可选", ImGuiTableColumnFlags_WidthFixed, dot * 1.6f);
-            ImGui::TableSetupColumn("名称", ImGuiTableColumnFlags_WidthFixed, dot * 1.6f);
+            ImGui::TableSetupColumn(tr("可见"), ImGuiTableColumnFlags_WidthFixed, dot * 1.6f);
+            ImGui::TableSetupColumn(tr("可选"), ImGuiTableColumnFlags_WidthFixed, dot * 1.6f);
+            ImGui::TableSetupColumn(tr("名称"), ImGuiTableColumnFlags_WidthFixed, dot * 1.6f);
             ImGui::TableNextRow(ImGuiTableRowFlags_None, fh);
-            const char* heads[] = {"", "显示", "可选", "名称"};
+            const char* heads[] = {"", tr("显示"), tr("可选"), tr("名称")};
             for (int c = 0; c < 4; ++c) {
                 ImGui::TableSetColumnIndex(c);
                 ImGui::AlignTextToFramePadding();
@@ -358,10 +368,10 @@ void Editor::drawMainToolbar() {
                     ImGui::PopID();
                 }
             };
-            line("骨骼", &view_.bonesVisible, &view_.bonesSelectable, &view_.boneNames);
-            line("图片", &view_.imagesVisible, &view_.imagesSelectable, nullptr);
-            line("网格线", &view_.meshVisible, nullptr, nullptr);
-            line("剪裁/边界框", &view_.polygonsVisible, nullptr, nullptr);
+            line(tr("骨骼"), &view_.bonesVisible, &view_.bonesSelectable, &view_.boneNames);
+            line(tr("图片"), &view_.imagesVisible, &view_.imagesSelectable, nullptr);
+            line(tr("网格线"), &view_.meshVisible, nullptr, nullptr);
+            line(tr("剪裁/边界框"), &view_.polygonsVisible, nullptr, nullptr);
             ImGui::EndTable();
         }
     }

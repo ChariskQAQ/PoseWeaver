@@ -7,6 +7,23 @@
 
 namespace rig {
 
+const char* blendModeName(BlendMode mode) {
+    switch (mode) {
+    case BlendMode::Normal: return "normal";
+    case BlendMode::Additive: return "additive";
+    case BlendMode::Multiply: return "multiply";
+    case BlendMode::Screen: return "screen";
+    }
+    return "invalid";
+}
+
+bool parseBlendMode(const std::string& name, BlendMode& mode) {
+    for (BlendMode candidate : {BlendMode::Normal, BlendMode::Additive, BlendMode::Multiply, BlendMode::Screen}) {
+        if (name == blendModeName(candidate)) { mode = candidate; return true; }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------- transforms
 
 Affine Transform::matrix() const {
@@ -333,7 +350,24 @@ std::string Skeleton::uniqueSkinName(const std::string& base) const {
 }
 
 void Skeleton::removeSkin(int skin) {
-    if (skin >= 0 && skin < (int)skins.size()) skins.erase(skins.begin() + skin);
+    if (skin<0 || skin>=(int)skins.size()) return;
+    auto update=[&](int slot,Attachment& attachment) {
+        const Attachment* cursor=&attachment; std::vector<const Attachment*> visited;
+        while (cursor && cursor->linkedAttachment>=0) {
+            if (cursor->linkedSkin==skin) { detachLinkedMesh(slot,attachment); break; }
+            if (std::find(visited.begin(),visited.end(),cursor)!=visited.end()) break;
+            visited.push_back(cursor); cursor=attachmentAt(slot,cursor->linkedAttachment,cursor->linkedSkin);
+        }
+    };
+    for (int s=0;s<(int)slots.size();++s) for (auto& attachment : slots[s].attachments) update(s,attachment);
+    for (auto& owner : skins) for (auto& entry : owner.attachments) update(entry.slot,entry.attachment);
+    skins.erase(skins.begin()+skin);
+    for (auto& slot : slots) for (auto& attachment : slot.attachments) if (attachment.linkedSkin>skin) --attachment.linkedSkin;
+    for (auto& owner : skins) for (auto& entry : owner.attachments) if (entry.attachment.linkedSkin>skin) --entry.attachment.linkedSkin;
+    for (auto& animation : animations) for (auto& [slot,timeline] : animation.slots) for (auto& [attachment,keys] : timeline.deform) {
+        keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const DeformKey& key) { return key.skin==skin; }),keys.end());
+        for (auto& key : keys) if (key.skin>skin) --key.skin;
+    }
 }
 
 Attachment* Skeleton::resolve(const std::vector<int>& activeSkins, int slot, int index) {
@@ -348,6 +382,60 @@ Attachment* Skeleton::resolve(const std::vector<int>& activeSkins, int slot, int
 
 const Attachment* Skeleton::resolve(const std::vector<int>& activeSkins, int slot, int index) const {
     return const_cast<Skeleton*>(this)->resolve(activeSkins, slot, index);
+}
+
+const Attachment* Skeleton::attachmentAt(int slot,int index,int skin) const {
+    if (slot<0 || slot>=(int)slots.size() || index<0 || index>=(int)slots[slot].attachments.size()) return nullptr;
+    const auto& a=slots[slot].attachments[index];
+    if (skin==-1) return a.skinPlaceholder ? nullptr : &a;
+    return skin>=0 && skin<(int)skins.size() && a.skinPlaceholder ? skins[skin].find(slot,a.name) : nullptr;
+}
+int Skeleton::attachmentSkin(int slot,const Attachment* attachment) const {
+    if (slot<0 || slot>=(int)slots.size()) return -1;
+    for (int i=0;i<(int)skins.size();++i) for (const auto& entry : skins[i].attachments)
+        if (entry.slot==slot && &entry.attachment==attachment) return i;
+    return -1;
+}
+const Attachment* Skeleton::meshSource(int slot,const Attachment& attachment) const {
+    const Attachment* current=&attachment;
+    std::vector<const Attachment*> visited;
+    while (current && current->linkedAttachment>=0) {
+        if (current->type!=AttachmentType::Mesh || std::find(visited.begin(),visited.end(),current)!=visited.end()) return nullptr;
+        visited.push_back(current);
+        current=attachmentAt(slot,current->linkedAttachment,current->linkedSkin);
+    }
+    return current && current->type==AttachmentType::Mesh && !current->skinPlaceholder ? current : nullptr;
+}
+void Skeleton::refreshLinkedMesh(int slot,Attachment& attachment) const {
+    if (attachment.linkedAttachment<0) return;
+    const auto* source=meshSource(slot,attachment); if (!source) return;
+    attachment.vertices=source->vertices; attachment.weights=source->weights;
+    attachment.uvs=source->uvs; attachment.triangles=source->triangles; attachment.hullLength=source->hullLength;
+}
+bool Skeleton::detachLinkedMesh(int slot,Attachment& attachment) {
+    if (attachment.linkedAttachment<0 || !meshSource(slot,attachment)) return false;
+    int target=-1;
+    const int targetSkin=attachmentSkin(slot,&attachment);
+    for (int i=0;i<(int)slots[slot].attachments.size();++i) if (attachmentAt(slot,i,targetSkin)==&attachment) target=i;
+    if (attachment.inheritDeform && target>=0) {
+        const Attachment* owner=&attachment; int source=target;
+        while (owner->linkedAttachment>=0 && owner->inheritDeform) {
+            source=owner->linkedAttachment; owner=attachmentAt(slot,source,owner->linkedSkin);
+        }
+        const int sourceSkin=attachmentSkin(slot,owner);
+        for (auto& animation : animations) {
+            auto timeline=animation.slots.find(slot); if (timeline==animation.slots.end()) continue;
+            auto sourceTrack=timeline->second.deform.find(source); if (sourceTrack==timeline->second.deform.end()) continue;
+            std::vector<DeformKey> copy;
+            for (auto key : sourceTrack->second) if (key.skin==sourceSkin) { key.skin=targetSkin; copy.push_back(std::move(key)); }
+            if (copy.empty()) for (auto key : sourceTrack->second) if (key.skin==-2) { key.skin=targetSkin; copy.push_back(std::move(key)); }
+            auto& destination=timeline->second.deform[target];
+            destination.erase(std::remove_if(destination.begin(),destination.end(),[&](const DeformKey& key) { return key.skin==targetSkin; }),destination.end());
+            destination.insert(destination.end(),copy.begin(),copy.end());
+            std::stable_sort(destination.begin(),destination.end(),[](const DeformKey& a,const DeformKey& b) { return a.time<b.time; });
+        }
+    }
+    refreshLinkedMesh(slot,attachment); attachment.linkedAttachment=attachment.linkedSkin=-1; return true;
 }
 
 void Skeleton::removeConstraint(int c) {
@@ -421,6 +509,16 @@ void Skeleton::removeAttachment(int slot, int attachment) {
     if (slot < 0 || slot >= (int)slots.size()) return;
     Slot& s = slots[slot];
     if (attachment < 0 || attachment >= (int)s.attachments.size()) return;
+    auto update=[&](Attachment& linked) {
+        const Attachment* cursor=&linked; std::vector<const Attachment*> visited;
+        while (cursor && cursor->linkedAttachment>=0) {
+            if (cursor->linkedAttachment==attachment) { detachLinkedMesh(slot,linked); break; }
+            if (std::find(visited.begin(),visited.end(),cursor)!=visited.end()) break;
+            visited.push_back(cursor); cursor=attachmentAt(slot,cursor->linkedAttachment,cursor->linkedSkin);
+        }
+    };
+    for (auto& linked : s.attachments) update(linked);
+    for (auto& skin : skins) for (auto& entry : skin.attachments) if (entry.slot==slot) update(entry.attachment);
     if (s.attachments[attachment].skinPlaceholder) {
         const std::string name = s.attachments[attachment].name;
         for (auto& skin : skins)
@@ -429,6 +527,8 @@ void Skeleton::removeAttachment(int slot, int attachment) {
                                    skin.attachments.end());
     }
     s.attachments.erase(s.attachments.begin() + attachment);
+    for (auto& linked : s.attachments) if (linked.linkedAttachment>attachment) --linked.linkedAttachment;
+    for (auto& skin : skins) for (auto& entry : skin.attachments) if (entry.slot==slot && entry.attachment.linkedAttachment>attachment) --entry.attachment.linkedAttachment;
     if (s.activeAttachment == attachment) s.activeAttachment = -1;
     else if (s.activeAttachment > attachment) --s.activeAttachment;
     for (auto& an : animations) {
@@ -448,18 +548,32 @@ void Skeleton::removeAttachment(int slot, int attachment) {
 
 int Skeleton::dropStaleDeformKeys(int slot, int attachment) {
     if (slot < 0 || slot >= (int)slots.size() || attachment < 0 || attachment >= (int)slots[slot].attachments.size()) return 0;
-    size_t n = slots[slot].attachments[attachment].vertexCount();
     int dropped = 0;
     for (auto& an : animations) {
         auto it = an.slots.find(slot);
         if (it == an.slots.end()) continue;
-        auto d = it->second.deform.find(attachment);
-        if (d == it->second.deform.end()) continue;
-        auto& keys = d->second;
-        size_t before = keys.size();
-        keys.erase(std::remove_if(keys.begin(), keys.end(), [&](const DeformKey& k) { return k.value.size() != n; }), keys.end());
-        dropped += (int)(before - keys.size());
-        if (keys.empty()) it->second.deform.erase(d);
+        for (auto d=it->second.deform.begin();d!=it->second.deform.end();) {
+            const int index=d->first; auto& keys=d->second; size_t before=keys.size();
+            keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const DeformKey& key) {
+                if (index<0 || index>=(int)slots[slot].attachments.size()) return false;
+                auto fits=[&](const Attachment* target) {
+                    if (!target) return false;
+                    if (target->linkedAttachment>=0) target=meshSource(slot,*target);
+                    return target && key.value.size()==target->vertexCount();
+                };
+                if (key.skin!=-2) {
+                    const auto* target=attachmentAt(slot,index,key.skin);
+                    return target && !fits(target);
+                }
+                const auto& base=slots[slot].attachments[index];
+                if (!base.skinPlaceholder) return !fits(&base);
+                bool found=false;
+                for (int s=0;s<(int)skins.size();++s) if (const auto* target=attachmentAt(slot,index,s)) { found=true; if (fits(target)) return false; }
+                return found;
+            }),keys.end());
+            dropped+=(int)(before-keys.size());
+            d=keys.empty() ? it->second.deform.erase(d) : std::next(d);
+        }
         if (it->second.empty()) an.slots.erase(it);
     }
     return dropped;
@@ -524,14 +638,81 @@ static bool contains(const std::vector<K>& keys, float time) {
 }
 
 void setRotateKey(Animation& anim, int bone, float time, float value) { upsert(anim.bones[bone].rotate, time, value); }
-void setTranslateKey(Animation& anim, int bone, float time, Vec2 value) { upsert(anim.bones[bone].translate, time, value); }
-void setScaleKey(Animation& anim, int bone, float time, Vec2 value) { upsert(anim.bones[bone].scale, time, value); }
-void setShearKey(Animation& anim, int bone, float time, Vec2 value) { upsert(anim.bones[bone].shear, time, value); }
+template<class K,class V> static void setCombinedKey(std::vector<K>& keys,float time,const V& value,unsigned mask) {
+    upsert(keys,time,value); findAt(keys,time)->componentMask = mask;
+}
+void setTranslateKey(Animation& anim, int bone, float time, Vec2 value) { setCombinedKey(anim.bones[bone].translate,time,value,3); }
+void setScaleKey(Animation& anim, int bone, float time, Vec2 value) { setCombinedKey(anim.bones[bone].scale,time,value,3); }
+void setShearKey(Animation& anim, int bone, float time, Vec2 value) { setCombinedKey(anim.bones[bone].shear,time,value,3); }
 void setAttachmentKey(Animation& anim, int slot, float time, int attachment) { upsert(anim.slots[slot].attachment, time, attachment); }
-void setColorKey(Animation& anim, int slot, float time, const Color& color) { upsert(anim.slots[slot].color, time, color); }
+void setColorKey(Animation& anim, int slot, float time, const Color& color) { setCombinedKey(anim.slots[slot].color,time,color,15); }
 
-void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets) {
-    upsert(anim.slots[slot].deform[attachment], time, offsets);
+static float& valueComponent(Vec2& value,int c) { return c ? value.y : value.x; }
+static float& valueComponent(Color& value,int c) { return value[c]; }
+static float valueComponent(const Vec2& value,int c) { return c ? value.y : value.x; }
+static float valueComponent(const Color& value,int c) { return value[c]; }
+template<class K> static bool editComponent(std::vector<K>& keys,int component,float time,float value) {
+    K* key = findAt(keys,time);
+    if (!key) { K fresh; fresh.time = time; fresh.componentMask = 0; insertSorted(keys,fresh); key = findAt(keys,time); }
+    valueComponent(key->value,component) = value; key->componentMask |= 1u << component; return true;
+}
+template<class K> static bool eraseComponent(std::vector<K>& keys,int component,float time) {
+    K* key = findAt(keys,time);
+    if (!key || !(key->componentMask & (1u << component))) return false;
+    key->componentMask &= ~(1u << component);
+    if (!key->componentMask) eraseAt(keys,time);
+    return true;
+}
+template<class K> static bool shiftComponent(std::vector<K>& keys,int component,float from,float to) {
+    K* source = findAt(keys,from); K* target = findAt(keys,to);
+    if (!source || !(source->componentMask & (1u << component)) || (target && (target->componentMask & (1u << component)))) return false;
+    K copy = *source; eraseComponent(keys,component,from);
+    editComponent(keys,component,to,valueComponent(copy.value,component));
+    editComponentCurve(*findAt(keys,to),component) = componentCurve(copy,component); return true;
+}
+template<class Action> static bool componentKeys(Animation& anim,int index,Channel channel,int component,Action action) {
+    if (index < 0 || component < 0) return false;
+    if (channel == Channel::Color) return component < 4 && action(anim.slots[index].color);
+    if (component > 1 || (channel != Channel::Translate && channel != Channel::Scale && channel != Channel::Shear)) return false;
+    auto& timeline = anim.bones[index];
+    return action(channel == Channel::Translate ? timeline.translate : channel == Channel::Scale ? timeline.scale : timeline.shear);
+}
+bool setComponentKey(Animation& anim,int index,Channel channel,int component,float time,float value) {
+    if (!std::isfinite(time) || time < 0 || !std::isfinite(value)) return false;
+    return componentKeys(anim,index,channel,component,[&](auto& keys) { return editComponent(keys,component,time,value); });
+}
+bool removeComponentKey(Animation& anim,int index,Channel channel,int component,float time) {
+    return componentKeys(anim,index,channel,component,[&](auto& keys) { return eraseComponent(keys,component,time); });
+}
+bool moveComponentKey(Animation& anim,int index,Channel channel,int component,float from,float to) {
+    if (!std::isfinite(to) || to < 0 || std::fabs(from-to) < kKeyEpsilon) return false;
+    return componentKeys(anim,index,channel,component,[&](auto& keys) { return shiftComponent(keys,component,from,to); });
+}
+bool usesComponentKeys(const Skeleton& sk) {
+    auto used = [](const auto& keys,unsigned mask) { return std::any_of(keys.begin(),keys.end(),[&](const auto& k) { return k.separatedCurves || k.componentMask != mask; }); };
+    for (const auto& animation : sk.animations) {
+        for (const auto& [index,timeline] : animation.bones)
+            if (used(timeline.translate,3) || used(timeline.scale,3) || used(timeline.shear,3)) return true;
+        for (const auto& [index,timeline] : animation.slots) if (used(timeline.color,15)) return true;
+    }
+    return false;
+}
+
+void setDeformKey(Animation& anim, int slot, int attachment, float time, const std::vector<Vec2>& offsets,int skin) {
+    auto& keys=anim.slots[slot].deform[attachment];
+    keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const DeformKey& key) { return key.skin==skin && std::fabs(key.time-time)<kKeyEpsilon; }),keys.end());
+    insertSorted(keys,DeformKey{time,offsets,{},skin});
+}
+bool hasDeformKey(const Animation& anim,int slot,int attachment,float time,int skin) {
+    auto s=anim.slots.find(slot); if (s==anim.slots.end()) return false;
+    auto a=s->second.deform.find(attachment); if (a==s->second.deform.end()) return false;
+    return std::any_of(a->second.begin(),a->second.end(),[&](const DeformKey& key) { return (key.skin==skin || key.skin==-2) && std::fabs(key.time-time)<kKeyEpsilon; });
+}
+void removeDeformKey(Animation& anim,int slot,int attachment,float time,int skin) {
+    auto s=anim.slots.find(slot); if (s==anim.slots.end()) return;
+    auto a=s->second.deform.find(attachment); if (a==s->second.deform.end()) return;
+    a->second.erase(std::remove_if(a->second.begin(),a->second.end(),[&](const DeformKey& key) { return (key.skin==skin || key.skin==-2) && std::fabs(key.time-time)<kKeyEpsilon; }),a->second.end());
+    if (a->second.empty()) s->second.deform.erase(a);
 }
 
 void setConstraintKey(Animation& anim, int constraint, float time, const ConstraintValues& values) {
@@ -682,11 +863,18 @@ static CurveShape* curveAt(Animation& anim, int index, Channel ch, float time, i
 }
 
 void setKeyCurve(Animation& anim, int index, Channel ch, float time, const CurveShape& curve, int sub) {
-    if (ch == Channel::Deform && sub < 0) {  // every deformed attachment of the slot
+    if (ch == Channel::Translate || ch == Channel::Scale || ch == Channel::Shear || ch == Channel::Color) {
+        componentKeys(anim,index,ch,0,[&](auto& keys) {
+            if (auto* key = findAt(keys,time)) { key->curve = curve; key->componentCurves.fill(curve); key->separatedCurves = false; }
+            return true;
+        });
+        return;
+    }
+    if (ch == Channel::Deform) {
         auto it = anim.slots.find(index);
         if (it == anim.slots.end()) return;
-        for (auto& [a, keys] : it->second.deform)
-            if (CurveShape* c = curveAt(anim, index, ch, time, a)) *c = curve;
+        for (auto& [a, keys] : it->second.deform) if (sub<0 || sub==a)
+            for (auto& key : keys) if (std::fabs(key.time-time)<kKeyEpsilon) key.curve=curve;
         return;
     }
     if (CurveShape* c = curveAt(anim, index, ch, time, sub)) *c = curve;
@@ -696,6 +884,23 @@ const CurveShape* keyCurve(const Animation& anim, int index, Channel ch, float t
     return curveAt(const_cast<Animation&>(anim), index, ch, time, sub);
 }
 
+template<class K> static void insertMerged(std::vector<K>& keys,const K& key) { eraseAt(keys,key.time); insertSorted(keys,key); }
+template<class K> static void mergeComponentKey(std::vector<K>& keys,const K& key,unsigned fullMask,int components) {
+    auto* target = findAt(keys,key.time);
+    if (!target || key.componentMask == fullMask) { eraseAt(keys,key.time); insertSorted(keys,key); return; }
+    for (int c = 0; c < components; ++c) if (key.componentMask & (1u << c)) {
+        valueComponent(target->value,c) = valueComponent(key.value,c);
+        editComponentCurve(*target,c) = componentCurve(key,c);
+    }
+    target->componentMask |= key.componentMask;
+}
+static void insertMerged(std::vector<Vec2Key>& keys,const Vec2Key& key) { mergeComponentKey(keys,key,3,2); }
+static void insertMerged(std::vector<ColorKey>& keys,const ColorKey& key) { mergeComponentKey(keys,key,15,4); }
+static void insertMerged(std::vector<DeformKey>& keys,const DeformKey& key) {
+    keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const DeformKey& other) { return other.skin==key.skin && std::fabs(other.time-key.time)<kKeyEpsilon; }),keys.end());
+    insertSorted(keys,key);
+}
+
 template <typename K>
 static void shiftKey(std::vector<K>& keys, float from, float to) {
     auto it = std::find_if(keys.begin(), keys.end(),
@@ -703,9 +908,13 @@ static void shiftKey(std::vector<K>& keys, float from, float to) {
     if (it == keys.end()) return;
     K moved = *it;
     keys.erase(it);
-    eraseAt(keys, to);
     moved.time = to;
-    insertSorted(keys, moved);
+    insertMerged(keys, moved);
+}
+static void shiftKey(std::vector<DeformKey>& keys,float from,float to) {
+    std::vector<DeformKey> moved;
+    keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const DeformKey& key) { if (std::fabs(key.time-from)>=kKeyEpsilon) return false; moved.push_back(key); return true; }),keys.end());
+    for (auto& key : moved) { key.time=to; insertMerged(keys,key); }
 }
 
 static void shiftBone(BoneTimeline& tl, float from, float to) {
@@ -844,10 +1053,14 @@ static void copyAt(const std::vector<K>& src, std::vector<K>& dst, float time, f
         if (std::fabs(k.time - time) >= kKeyEpsilon) continue;
         K copy = k;
         copy.time = newTime;
-        eraseAt(dst, newTime);
-        insertSorted(dst, copy);
+        insertMerged(dst, copy);
         return;
     }
+}
+static void copyAt(const std::vector<DeformKey>& src,std::vector<DeformKey>& dst,float time,float newTime) {
+    std::vector<DeformKey> copied;
+    for (auto key : src) if (std::fabs(key.time-time)<kKeyEpsilon) { key.time=newTime; copied.push_back(std::move(key)); }
+    for (const auto& key : copied) insertMerged(dst,key);
 }
 
 void copyKey(const Animation& src, Animation& dst, int index, Channel ch, int sub, float time, float newTime) {

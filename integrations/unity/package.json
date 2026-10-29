@@ -1,0 +1,8 @@
+{
+  "name": "com.poseweaver.frames",
+  "version": "1.1.1",
+  "displayName": "Poseweaver",
+  "description": "Imports baked frames and Windows x64 real-time skeletons as playable prefabs.",
+  "unity": "2022.3",
+  "samples": [{"displayName": "Baked arm", "description": "An exported wave animation.", "path": "Samples~/Demo"}]
+}

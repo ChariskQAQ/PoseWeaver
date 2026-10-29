@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://example/arm.pwframes" id="1"]
+
+[node name="PoseweaverDemo" type="Node2D"]
+
+[node name="Character" parent="." instance=ExtResource("1")]
+position = Vector2(480, 350)

@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-23",
+  "version": "1.0.3",
+  "build": "Release x64, MSVC 14.44, C++17",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD Ryzen 9 8945HX with Radeon Graphics",
+  "device": "GPU=NVIDIA Corporation; renderer=NVIDIA GeForce RTX 5070 Laptop GPU/PCIe/SSE2; fixture=synthetic; bones=513; slots=512; textures=8; source_RGBA_MiB=128.0; hidden UI CPU build, GPU submission/presentation excluded",
+  "fixture": {
+    "bones": 513,
+    "slots": 512,
+    "mesh_vertices": 12800,
+    "constraints": 32,
+    "source_rgba_mib": 128,
+    "textures": 8,
+    "texture_size": [
+      2048,
+      2048
+    ]
+  },
+  "limits": [
+    "Synthetic stress fixture; no large production project supplied",
+    "Hidden ImGui CPU build only; excludes GPU submission, execution and presentation",
+    "No fixed CPU or GPU frequency; no cross-machine timing threshold",
+    "Open includes warm filesystem cache; first export includes settings write",
+    "Drag was added after the initial baseline; no before timing for drag"
+  ],
+  "baseline_note": "Before immutable image snapshots, duplicate export diagnosis removal and unchanged-settings write skip"
+}

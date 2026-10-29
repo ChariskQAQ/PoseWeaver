@@ -1,0 +1,11 @@
+fixture,stage,samples,mean_ms,p50_ms,p95_ms
+user_project,open,5,14.867,14.025,19.540
+user_project,play_ui_cpu,60,0.119,0.107,0.196
+user_project,drag_update,60,0.003,0.003,0.006
+user_project,checkpoint,5,0.409,0.407,0.421
+user_project,undo,5,0.663,0.665,0.675
+user_project,export_start,1,8.540,8.540,8.540
+user_project,export_start,1,2.223,2.223,2.223
+user_project,export_start,1,2.843,2.843,2.843
+user_project,export_start,1,3.257,3.257,3.257
+user_project,export_start,1,2.642,2.642,2.642

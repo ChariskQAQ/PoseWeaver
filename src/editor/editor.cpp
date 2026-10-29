@@ -1,7 +1,9 @@
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "core/mesh_tools.h"
 #include "core/serialize.h"
+#include "core/project_resources.h"
 #include "editor/icons.h"
 #include "editor/theme.h"
 #include "platform/file_dialog.h"
@@ -16,12 +18,23 @@ using namespace rig;
 
 static constexpr size_t kMaxUndo = 200;
 
-Editor::Editor() : audio_(std::make_unique<AudioPlayer>()) {
-    newProject();
+Editor::Editor(const std::string& settingsDirectory)
+    : settingsDirectory_(settingsDirectory), audio_(std::make_unique<AudioPlayer>()) {
+    resetProject();
     loadSettings();
+    std::error_code ec;
+    recoveryAvailable_ = fs::is_regular_file(fs::u8path(recoveryPath()), ec);
+    showRecoveryDialog_ = recoveryAvailable_;
+    refreshExportRecoveries();
 }
 
 Editor::~Editor() {
+    if (exportRecoveryTask_.valid()) exportRecoveryTask_.wait();
+    resetResourceScan();
+    resetImageExport();
+    saveImageExportSettings();
+    resetEngineExport();
+    releaseTexture(effectsTexture_);
     for (auto& t : textures_) releaseTexture(t);
 }
 
@@ -95,10 +108,18 @@ void Editor::frame(float dt) {
         drawMixPreview();
     }
     drawViewport();
+    drawIssues();
+    pollResourceScan();
+    drawResourceRelink();
     drawCloseDialog();
+    drawRecoveryDialog();
+    pollExportRecovery();
+    drawExportRecovery();
     drawSplash();
     drawShortcuts();
     drawIoDialogs();
+    drawRenderEffects();
+    updateRecovery(dt, ImGui::IsAnyItemActive() || drag_.kind != Drag::None || (bool)pendingDocumentChange_);
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
 }
 
@@ -117,6 +138,7 @@ void Editor::setupDockLayout(unsigned int dockspace) {
     ImGui::DockBuilderDockWindow("###Dopesheet", bottom);
     ImGui::DockBuilderDockWindow("###Graph", bottom);
     ImGui::DockBuilderDockWindow("###Preview", bottom);
+    ImGui::DockBuilderDockWindow("###Issues", bottom);
     // The viewport is the workspace, not a tab: hide its tab bar like Spine does.
     if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(center)) n->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar;
     ImGui::DockBuilderFinish(dockspace);
@@ -124,47 +146,191 @@ void Editor::setupDockLayout(unsigned int dockspace) {
 
 // ---------------------------------------------------------------- undo
 
-void Editor::checkpoint() {
-    undo_.push_back(toJson(sk_, -1));
-    if (undo_.size() > kMaxUndo) undo_.erase(undo_.begin());
+void Editor::pushCheckpoint(UndoEntry entry) {
+    // Object indices in operation notices become stale after the next edit.
+    sessionIssues_.erase(std::remove_if(sessionIssues_.begin(), sessionIssues_.end(), [](const Diagnostic& d) {
+        return d.target != IssueTarget::File && d.target != IssueTarget::Skeleton;
+    }), sessionIssues_.end());
+    entry.position = historyPosition_;
+    undo_.push_back(std::move(entry));
     redo_.clear();
+    trimUndoHistory();
+    historyPosition_ = nextHistoryPosition_++;
     dirty_ = true;
+    recoveryPending_ = issuesDirty_ = true;
     mixActive_ = false;  // edits key the current animation: show it again instead of the mix
 }
 
-void Editor::restore(const std::string& snapshot) {
-    std::vector<std::string> oldPaths;
-    for (auto& im : sk_.images) oldPaths.push_back(im.path);
-    Skeleton s;
-    std::string err;
-    if (!fromJson(snapshot, s, &err)) {
-        setStatus("撤销失败: " + err);
-        return;
+void Editor::checkpoint() {
+    pushCheckpoint({toJson(sk_, -1), historyPosition_});
+}
+
+uint64_t Editor::UndoEntry::memoryBytes() const {
+    if (kind == Document) return snapshot.capacity();
+    if (kind == Bone) return sizeof(bone) + bone.name.capacity();
+    if (kind == Name) return name.capacity();
+    uint64_t bytes = sizeof(attachment) + attachment.name.capacity() + attachment.uvs.capacity()*sizeof(Vec2) +
+        attachment.vertices.capacity()*sizeof(Vec2) + attachment.triangles.capacity()*sizeof(int) +
+        attachment.weights.capacity()*sizeof(std::vector<VertexWeight>);
+    for (const auto& vertex : attachment.weights) bytes += vertex.capacity()*sizeof(VertexWeight);
+    return bytes;
+}
+
+Attachment* Editor::historyAttachment(const UndoEntry& entry) {
+    if (entry.slot < 0 || entry.slot >= (int)sk_.slots.size() || entry.index < 0) return nullptr;
+    if (entry.skin < 0) {
+        auto& list = sk_.slots[entry.slot].attachments;
+        return entry.index < (int)list.size() ? &list[entry.index] : nullptr;
     }
-    sk_ = std::move(s);
-    std::vector<std::string> newPaths;
-    for (auto& im : sk_.images) newPaths.push_back(im.path);
-    if (newPaths != oldPaths) reloadTextures();
+    if (entry.skin >= (int)sk_.skins.size()) return nullptr;
+    auto& list = sk_.skins[entry.skin].attachments;
+    return entry.index < (int)list.size() && list[entry.index].slot == entry.slot ? &list[entry.index].attachment : nullptr;
+}
+
+std::string* Editor::historyName(const UndoEntry& entry) {
+    if (entry.index < 0) return nullptr;
+    switch (entry.nameKind) {
+    case Selection::Bone: return entry.index < (int)sk_.bones.size() ? &sk_.bones[entry.index].name : nullptr;
+    case Selection::Slot: return entry.index < (int)sk_.slots.size() ? &sk_.slots[entry.index].name : nullptr;
+    case Selection::Animation: return entry.index < (int)sk_.animations.size() ? &sk_.animations[entry.index].name : nullptr;
+    case Selection::Event: return entry.index < (int)sk_.events.size() ? &sk_.events[entry.index].name : nullptr;
+    case Selection::Constraint: return entry.index < (int)sk_.constraints.size() ? &sk_.constraints[entry.index].name : nullptr;
+    case Selection::Skin: return entry.index < (int)sk_.skins.size() ? &sk_.skins[entry.index].name : nullptr;
+    default: return nullptr;
+    }
+}
+
+bool Editor::captureHistory(const UndoEntry& shape, UndoEntry& entry) {
+    entry.kind = shape.kind; entry.position = historyPosition_;
+    entry.index = shape.index; entry.slot = shape.slot; entry.skin = shape.skin; entry.nameKind = shape.nameKind;
+    if (shape.kind == UndoEntry::Document) { entry.snapshot = toJson(sk_, -1); return true; }
+    if (shape.kind == UndoEntry::Bone && shape.index >= 0 && shape.index < (int)sk_.bones.size()) { entry.bone = sk_.bones[shape.index]; return true; }
+    if (shape.kind == UndoEntry::Name) if (const auto* name = historyName(shape)) { entry.name = *name; return true; }
+    if (shape.kind == UndoEntry::Attachment) if (const auto* attachment = historyAttachment(shape)) { entry.attachment = *attachment; return true; }
+    return failOperation("UNDO_FAILED", std::string(tr("撤销失败: ")) + "History target is unavailable", {}, IssueTarget::Skeleton);
+}
+
+void Editor::checkpointBone(int bone) {
+    if (mode_ != Mode::Setup || compBones_ || compImages_ || bone < 0 || bone >= (int)sk_.bones.size()) { checkpoint(); return; }
+    UndoEntry entry; entry.kind = UndoEntry::Bone; entry.index = bone; entry.bone = sk_.bones[bone];
+    pushCheckpoint(std::move(entry));
+}
+
+void Editor::checkpointName() {
+    UndoEntry shape, entry; shape.kind = UndoEntry::Name; shape.nameKind = sel_.kind;
+    shape.index = sel_.kind == Selection::Bone ? sel_.bone : sel_.kind == Selection::Slot ? sel_.slot : sel_.index;
+    if (!historyName(shape)) { checkpoint(); return; }
+    if (captureHistory(shape, entry)) pushCheckpoint(std::move(entry));
+}
+
+void Editor::checkpointAttachment() {
+    if (mode_ != Mode::Setup) { checkpoint(); return; }
+    auto* attachment = selectedAttachment();
+    UndoEntry entry; entry.kind = UndoEntry::Attachment; entry.slot = sel_.slot;
+    if (attachment && sel_.slot >= 0 && sel_.slot < (int)sk_.slots.size()) {
+        const auto& list = sk_.slots[sel_.slot].attachments;
+        for (int i = 0; i < (int)list.size(); ++i) if (&list[i] == attachment) { entry.index = i; break; }
+        for (int skin = 0; entry.index < 0 && skin < (int)sk_.skins.size(); ++skin)
+            for (int i = 0; i < (int)sk_.skins[skin].attachments.size(); ++i)
+                if (&sk_.skins[skin].attachments[i].attachment == attachment) { entry.index = i; entry.skin = skin; break; }
+    }
+    if (entry.index < 0) { checkpoint(); return; }
+    entry.attachment = *attachment; pushCheckpoint(std::move(entry));
+}
+
+bool Editor::restore(const UndoEntry& entry) {
+    if (entry.kind == UndoEntry::Bone) {
+        if (entry.index < 0 || entry.index >= (int)sk_.bones.size()) return failOperation("UNDO_FAILED", std::string(tr("撤销失败: ")) + "Bone is unavailable", {}, IssueTarget::Skeleton);
+        sk_.bones[entry.index] = entry.bone;
+    } else if (entry.kind == UndoEntry::Name) {
+        auto* name = historyName(entry);
+        if (!name) return failOperation("UNDO_FAILED", std::string(tr("撤销失败: ")) + "Name target is unavailable", {}, IssueTarget::Skeleton);
+        *name = entry.name;
+    } else if (entry.kind == UndoEntry::Attachment) {
+        auto* attachment = historyAttachment(entry);
+        if (!attachment) return failOperation("UNDO_FAILED", std::string(tr("撤销失败: ")) + "Attachment is unavailable", {}, IssueTarget::Skeleton);
+        *attachment = entry.attachment;
+    } else {
+        std::vector<std::string> oldPaths;
+        for (auto& im : sk_.images) oldPaths.push_back(im.path);
+        Skeleton s;
+        std::string err;
+        if (!fromJson(entry.snapshot, s, &err)) {
+            return failOperation("UNDO_FAILED", tr("撤销失败: ") + err, {}, IssueTarget::Skeleton);
+        }
+        sk_ = std::move(s);
+        std::vector<std::string> newPaths;
+        for (auto& im : sk_.images) newPaths.push_back(im.path);
+        if (newPaths != oldPaths) reloadTextures();
+    }
     if (anim_ >= (int)sk_.animations.size()) anim_ = (int)sk_.animations.size() - 1;
     pending_.clear();
     validateSelection();
-    dirty_ = true;
+    historyPosition_ = entry.position;
+    dirty_ = !savedPosition_ || historyPosition_ != *savedPosition_;
+    recoveryPending_ = dirty_;
+    issuesDirty_ = true;
+    dismissIssue("DEFORM_KEYS_REMOVED");
+    if (!dirty_) clearRecovery();
+    return true;
+}
+
+void Editor::markSaved() {
+    savedPosition_ = historyPosition_;
+    dirty_ = recoveryPending_ = false;
+}
+
+void Editor::markUnsaved() {
+    savedPosition_.reset();
+    dirty_ = recoveryPending_ = true;
+}
+
+bool Editor::commitDocumentChange(Skeleton document) {
+    if (toJson(sk_, -1) == toJson(document, -1)) return false;
+    checkpoint();
+    sk_ = std::move(document);
+    return true;
 }
 
 void Editor::undo() {
     if (undo_.empty()) return;
-    redo_.push_back(toJson(sk_, -1));
-    std::string s = std::move(undo_.back());
+    UndoEntry current;
+    if (!captureHistory(undo_.back(), current)) return;
+    if (!restore(undo_.back())) return;
+    redo_.push_back(std::move(current));
     undo_.pop_back();
-    restore(s);
+    trimUndoHistory(false);
 }
 
 void Editor::redo() {
     if (redo_.empty()) return;
-    undo_.push_back(toJson(sk_, -1));
-    std::string s = std::move(redo_.back());
+    UndoEntry current;
+    if (!captureHistory(redo_.back(), current)) return;
+    if (!restore(redo_.back())) return;
+    undo_.push_back(std::move(current));
     redo_.pop_back();
-    restore(s);
+    trimUndoHistory();
+}
+
+uint64_t Editor::undoMemoryBytes() const {
+    uint64_t bytes = 0;
+    for (const auto& entry : undo_) bytes += entry.memoryBytes();
+    for (const auto& entry : redo_) bytes += entry.memoryBytes();
+    return bytes;
+}
+
+void Editor::trimUndoHistory(bool preferUndo) {
+    auto& keep = preferUndo ? undo_ : redo_;
+    auto& other = preferUndo ? redo_ : undo_;
+    uint64_t bytes = undoMemoryBytes(), budget = uint64_t(settings_.undoMemoryMiB) * 1024 * 1024;
+    bool trimmed = false;
+    while (bytes > budget || undo_.size() + redo_.size() > kMaxUndo) {
+        auto& entries = other.empty() ? keep : other;
+        if (entries.empty()) break;
+        bytes -= entries.front().memoryBytes();
+        entries.erase(entries.begin()); trimmed = true;
+    }
+    if (trimmed) reportIssue("UNDO_BUDGET",tr("撤销历史达到预算，已移除最远的记录；超出预算的单步无法撤销。"),Severity::Warning);
 }
 
 // ---------------------------------------------------------------- selection
@@ -261,10 +427,14 @@ void Editor::validateSelection() {
 Attachment* Editor::selectedAttachment() {
     if (sel_.slot < 0 || sel_.slot >= (int)sk_.slots.size()) return nullptr;
     Slot& s = sk_.slots[sel_.slot];
-    int a = s.activeAttachment;
-    if (mode_ == Mode::Animate && sel_.slot < (int)pose_.slotAttachment.size()) a = pose_.slotAttachment[sel_.slot];
+    int a = sel_.kind == Selection::Attachment ? sel_.attachment : s.activeAttachment;
+    if (sel_.kind != Selection::Attachment && mode_ == Mode::Animate && sel_.slot < (int)pose_.slotAttachment.size())
+        a = pose_.slotAttachment[sel_.slot];
     if (a < 0 || a >= (int)s.attachments.size()) return nullptr;
-    return sk_.resolve(activeSkins_, sel_.slot, a);
+    auto* attachment=sk_.resolve(activeSkins_, sel_.slot, a);
+    // Linked arrays are editor read-only caches; core rendering always resolves the live source.
+    if (attachment && attachment->linkedAttachment>=0) sk_.refreshLinkedMesh(sel_.slot,*attachment);
+    return attachment;
 }
 
 Attachment* Editor::transformTargetAttachment() {
@@ -277,6 +447,14 @@ Attachment* Editor::transformTargetAttachment() {
 }
 
 // ---------------------------------------------------------------- pose / animation
+
+bool Editor::setSlotBlend(int slot, BlendMode blend) {
+    if (mode_ != Mode::Setup || slot < 0 || slot >= (int)sk_.slots.size() ||
+        blend < BlendMode::Normal || blend > BlendMode::Screen || sk_.slots[slot].blend == blend) return false;
+    checkpoint();
+    sk_.slots[slot].blend = blend;
+    return true;
+}
 
 void Editor::updatePose() {
     if (mode_ == Mode::Setup) {
@@ -342,7 +520,7 @@ void Editor::setMode(Mode m) {
 void Editor::setTool(Tool t) {
     bool setupOnly = t == Tool::CreateBone || t == Tool::Weights;  // the mesh tool keys deforms in Animate mode
     if (setupOnly && mode_ != Mode::Setup) {
-        setStatus("该工具只能在 Setup 模式下使用");
+        setStatus(tr("该工具只能在 Setup 模式下使用"));
         return;
     }
     if (t == tool_) return;
@@ -451,7 +629,7 @@ void Editor::keyPending() {
     bool any = false;
     for (auto& [b, p] : pending_) any |= p.any();
     if (!any) {
-        setStatus("没有未打帧的改动");
+        setStatus(tr("没有未打帧的改动"));
         return;
     }
     checkpoint();
@@ -460,7 +638,7 @@ void Editor::keyPending() {
         writeBoneKeys(*currentAnimation(), sk_.bones[b], b, time_, pose_.local[b], p.rot, p.trans, p.scale, p.shear);
     pending_.clear();
     updatePose();
-    setStatus("已为所有改动打关键帧");
+    setStatus(tr("已为所有改动打关键帧"));
 }
 
 KeyState Editor::boneKeyState(int bone, Channel ch) {
@@ -518,7 +696,7 @@ void Editor::keyEvent(int event) {
     checkpoint();
     if (!currentAnimation()) createAnimation();
     setEventKey(*currentAnimation(), time_, event, sk_.events[event]);
-    setStatus("已在第 " + std::to_string((int)std::round(time_ * fps_)) + " 帧插入事件 " + sk_.events[event].name);
+    setStatus(tr("已在第 ") + std::to_string((int)std::round(time_ * fps_)) + tr(" 帧插入事件 ") + sk_.events[event].name);
 }
 
 void Editor::triggerEvents(float from, float to) {
@@ -571,6 +749,18 @@ void Editor::setStatus(const std::string& msg) {
 }
 
 void Editor::newProject() {
+    requestDocumentChange([this] { resetProject(); return true; });
+}
+
+void Editor::resetProject() {
+    resetImageExport();
+    saveImageExportSettings();
+    static_cast<ImageExportOptions&>(io_) = {};
+    imageOutputPath_.clear(); imageBudget_ = {}; imageBudgetHistory_ = UINT64_MAX;
+    imageSettingsDirty_ = imageSettingsReadOnly_ = false;
+    resetEngineExport();
+    releaseTexture(effectsTexture_); effectsPoseKey_.clear(); effectsCacheValid_ = effectsEditing_ = false;
+    effectsGpu_.release(); effectsUsingGpu_ = false;
     for (auto& t : textures_) releaseTexture(t);
     textures_.clear();
     sk_ = Skeleton{};
@@ -578,7 +768,8 @@ void Editor::newProject() {
     projectPath_.clear();
     undo_.clear();
     redo_.clear();
-    dirty_ = false;
+    historyPosition_ = 0;
+    nextHistoryPosition_ = 1;
     sel_.clear();
     selectBone(0);
     anim_ = -1;
@@ -594,6 +785,16 @@ void Editor::newProject() {
     sheetLocked_ = false;
     viewOffset_ = {0, 0};
     zoom_ = 1;
+    mixActive_ = false;
+    audio_->stopAll();
+    sessionIssues_.clear();
+    resetResourceScan();
+    resourceMatches_.clear(); resourceRelinkDirectory_.clear(); resourceScanNotice_.clear(); showResourceRelink_ = false;
+    selectedIssueKey_.clear();
+    issuesDirty_ = true;
+    recoveryPending_ = false;
+    recoveryElapsed_ = 0;
+    markSaved();
 }
 
 std::string Editor::resolveImagePath(const std::string& stored) const {
@@ -603,6 +804,7 @@ std::string Editor::resolveImagePath(const std::string& stored) const {
 }
 
 void Editor::reloadTextures() {
+    effectsCacheValid_ = false;
     for (auto& t : textures_) releaseTexture(t);
     textures_.assign(sk_.images.size(), Texture{});
     std::string missing;
@@ -615,24 +817,28 @@ void Editor::reloadTextures() {
             missing += (missing.empty() ? "" : ", ") + fs::u8path(sk_.images[i].path).filename().u8string();
         }
     }
-    if (!missing.empty()) setStatus("找不到图片: " + missing);
+    if (!missing.empty()) setStatus(tr("找不到图片: ") + missing);
 }
 
 void Editor::openProjectDialog() {
-    std::string path = openFileDialog("RigEditor 工程 (*.rig.json)", "*.rig.json;*.json");
+    std::string path = openFileDialog(tr("Poseweaver 工程 (*.rig.json)"), "*.rig.json;*.json");
     if (!path.empty()) openProject(path);
 }
 
 bool Editor::openProject(const std::string& path) {
+    return requestDocumentChange([this, path] { return openProjectNow(path); });
+}
+
+bool Editor::openProjectNow(const std::string& path) {
     Skeleton s;
     std::string err;
     if (!loadFile(path, s, &err)) {
-        setStatus("打开失败: " + err);
-        return false;
+        return failOperation("OPEN_FAILED", tr("打开失败: ") + err, path);
     }
-    newProject();
+    resetProject();
     sk_ = std::move(s);
-    projectPath_ = path;
+    projectPath_ = fs::absolute(fs::u8path(path)).lexically_normal().u8string();
+    loadEngineExportSettings();
     // Keep absolute image paths in memory; they are made relative again on save.
     for (auto& im : sk_.images) im.path = resolveImagePath(im.path);
     for (auto& e : sk_.events)
@@ -640,11 +846,15 @@ bool Editor::openProject(const std::string& path) {
     reloadTextures();
     selectBone(sk_.bones.empty() ? -1 : 0);
     anim_ = sk_.animations.empty() ? -1 : 0;
+    loadImageExportSettings();
     if (!sk_.skins.empty()) activeSkins_ = {0};
-    dirty_ = false;
+    markSaved();
+    issuesDirty_ = true;
     frameAllIn_ = 5;
     addRecent(path);
-    setStatus("已打开 " + fs::u8path(path).filename().u8string());
+    refreshIssues();
+    if (!issues_.empty()) openIssues();
+    setStatus(tr("已打开 ") + fs::u8path(path).filename().u8string());
     return true;
 }
 
@@ -668,36 +878,57 @@ static Skeleton withRelativePaths(const Skeleton& sk, const fs::path& dir) {
 
 bool Editor::saveProject(bool saveAs) {
     std::string path = projectPath_;
+    bool collect = settings_.collectResources;
     if (saveAs || path.empty()) {
-        path = saveFileDialog("RigEditor 工程 (*.rig.json)", "*.rig.json", "rig.json");
+        path = saveFileDialog(tr("Poseweaver 工程 (*.rig.json)"), "*.rig.json", "rig.json", &collect, tr("收集工程资源（图片和音频）"));
         if (path.empty()) return false;
     }
-    std::string err;
-    Skeleton out = withRelativePaths(sk_, fs::u8path(path).parent_path());
-    if (!saveFile(path, out, &err)) {
-        setStatus("保存失败: " + err);
-        return false;
+    if (!saveProjectTo(path, collect)) return false;
+    if (settings_.collectResources != collect) {
+        settings_.collectResources = collect;
+        saveSettings();
     }
-    projectPath_ = path;
-    dirty_ = false;
+    return true;
+}
+
+bool Editor::saveProjectTo(const std::string& path, bool collectResources) {
+    std::string err;
+    if (collectResources) {
+        Skeleton collected;
+        const std::string sourceDirectory = projectPath_.empty() ? std::string() : fs::absolute(fs::u8path(projectPath_)).parent_path().u8string();
+        if (!saveCollectedProject(path, sk_, sourceDirectory, collected, &err))
+            return failOperation("SAVE_FAILED", tr("保存失败: ") + err, path);
+        // The copied files and project are committed before the one undoable path change.
+        commitDocumentChange(std::move(collected));
+    } else {
+        Skeleton out = withRelativePaths(sk_, fs::u8path(path).parent_path());
+        if (!saveFile(path, out, &err)) return failOperation("SAVE_FAILED", tr("保存失败: ") + err, path);
+    }
+    projectPath_ = fs::absolute(fs::u8path(path)).lexically_normal().u8string();
+    saveEngineExportSettings();
+    saveImageExportSettings();
+    markSaved();
+    clearRecovery();
+    dismissIssue("SAVE_FAILED");
+    issuesDirty_ = true;
     addRecent(path);
-    setStatus("已保存 " + fs::u8path(path).filename().u8string());
+    setStatus((collectResources ? tr("已保存并收集工程资源 ") : tr("已保存 ")) + fs::u8path(path).filename().u8string());
     return true;
 }
 
 void Editor::exportRuntimeJson() {
-    std::string path = saveFileDialog("运行时 JSON (*.json)", "*.json", "json");
+    std::string path = saveFileDialog(tr("运行时 JSON (*.json)"), "*.json", "json");
     if (path.empty()) return;
     std::string err;
     Skeleton out = withRelativePaths(sk_, fs::u8path(path).parent_path());
     if (saveFile(path, out, &err))
-        setStatus("已导出 " + fs::u8path(path).filename().u8string());
+        setStatus(tr("已导出 ") + fs::u8path(path).filename().u8string());
     else
-        setStatus("导出失败: " + err);
+        failOperation("DATA_EXPORT_FAILED", tr("导出失败: ") + err, path);
 }
 
 void Editor::importImageDialog() {
-    std::string path = openFileDialog("图片 (png/jpg/bmp/tga)", "*.png;*.jpg;*.jpeg;*.bmp;*.tga");
+    std::string path = openFileDialog(tr("图片 (png/jpg/bmp/tga)"), "*.png;*.jpg;*.jpeg;*.bmp;*.tga");
     if (!path.empty()) importImage(path);
 }
 
@@ -705,8 +936,7 @@ bool Editor::importImage(const std::string& path) {
     Texture tex;
     std::string err;
     if (!loadTexture(path, tex, &err)) {
-        setStatus("无法读取图片: " + err);
-        return false;
+        return failOperation("IMAGE_IMPORT_FAILED", tr("无法读取图片: ") + err, path);
     }
     checkpoint();
     if (sk_.bones.empty()) sk_.addBone("root", -1, {}, 0);
@@ -738,19 +968,38 @@ bool Editor::importImage(const std::string& path) {
     sk_.slots.push_back(slot);
 
     selectAttachment((int)sk_.slots.size() - 1, 0);
-    setStatus("已导入 " + stem);
+    dismissIssue("IMAGE_IMPORT_FAILED");
+    setStatus(tr("已导入 ") + stem);
+    return true;
+}
+
+bool Editor::relinkImage(int image, const std::string& path) {
+    if (image < 0 || image >= (int)sk_.images.size()) return false;
+    Texture texture;
+    std::string error;
+    if (!loadTexture(path, texture, &error)) {
+        return failOperation("IMAGE_RELINK_FAILED", tr("无法读取图片: ") + error, path, IssueTarget::Image, image);
+    }
+    checkpoint();
+    sk_.images[image] = {fs::absolute(fs::u8path(path)).lexically_normal().u8string(), texture.width, texture.height};
+    textures_.resize(sk_.images.size());
+    releaseTexture(textures_[image]);
+    textures_[image] = std::move(texture);
+    effectsCacheValid_ = false;
+    dismissIssue("IMAGE_RELINK_FAILED");
+    refreshIssues();
     return true;
 }
 
 void Editor::onFilesDropped(const std::vector<std::string>& paths) {
-    for (auto& p : paths) {
+    // A dropped project is one document switch; do not import later files into the old document while confirmation is pending.
+    for (const auto& p : paths) {
         std::string ext = fs::u8path(p).extension().u8string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-        if (ext == ".json")
-            openProject(p);
-        else
-            importImage(p);
+        if (ext == ".json" || ext == ".rigb") { openProject(p); return; }
     }
+    if (!pendingDocumentChange_)
+        for (const auto& p : paths) importImage(p);
 }
 
 void Editor::removeSlot(int slot) {
@@ -773,12 +1022,12 @@ void Editor::renameSelection(const std::string& name) {
     switch (sel_.kind) {
     case Selection::Bone:
         if (name == sk_.bones[sel_.bone].name) return;
-        checkpoint();
+        checkpointName();
         sk_.bones[sel_.bone].name = sk_.uniqueBoneName(name);
         break;
     case Selection::Slot:
         if (name == sk_.slots[sel_.slot].name) return;
-        checkpoint();
+        checkpointName();
         sk_.slots[sel_.slot].name = sk_.uniqueSlotName(name);
         break;
     case Selection::Attachment:
@@ -793,22 +1042,22 @@ void Editor::renameSelection(const std::string& name) {
         sk_.slots[sel_.slot].attachments[sel_.attachment].name = name;
         break;
     case Selection::Animation:
-        checkpoint();
+        checkpointName();
         sk_.animations[sel_.index].name = name;
         break;
     case Selection::Event:
         if (name == sk_.events[sel_.index].name) return;
-        checkpoint();
+        checkpointName();
         sk_.events[sel_.index].name = sk_.uniqueEventName(name);
         break;
     case Selection::Skin:
         if (name == sk_.skins[sel_.index].name) return;
-        checkpoint();
+        checkpointName();
         sk_.skins[sel_.index].name = sk_.uniqueSkinName(name);
         break;
     case Selection::Constraint:
         if (name == sk_.constraints[sel_.index].name) return;
-        checkpoint();
+        checkpointName();
         sk_.constraints[sel_.index].name = sk_.uniqueConstraintName(name);
         break;
     default:
@@ -822,18 +1071,18 @@ void Editor::deleteSelection() {
         checkpoint();
         removeSlot(sel_.slot);
         sel_.clear();
-        setStatus("已删除插槽");
+        setStatus(tr("已删除插槽"));
         return;
     case Selection::Attachment: {
         if (mode_ != Mode::Setup) {
-            setStatus("请在 Setup 模式下删除附件");
+            setStatus(tr("请在 Setup 模式下删除附件"));
             return;
         }
         checkpoint();
         int s = sel_.slot;
         sk_.removeAttachment(s, sel_.attachment);
         selectSlot(s);
-        setStatus("已删除附件");
+        setStatus(tr("已删除附件"));
         return;
     }
     case Selection::Animation:
@@ -842,13 +1091,13 @@ void Editor::deleteSelection() {
         anim_ = std::min(anim_, (int)sk_.animations.size() - 1);
         sel_.clear();
         playing_ = false;
-        setStatus("已删除动画");
+        setStatus(tr("已删除动画"));
         return;
     case Selection::Event:
         checkpoint();
         sk_.removeEvent(sel_.index);
         sel_.clear();
-        setStatus("已删除事件");
+        setStatus(tr("已删除事件"));
         return;
     case Selection::Skin: {
         checkpoint();
@@ -859,7 +1108,7 @@ void Editor::deleteSelection() {
             if (s != skin) kept.push_back(s > skin ? s - 1 : s);
         activeSkins_ = kept;
         sel_.clear();
-        setStatus("已删除皮肤");
+        setStatus(tr("已删除皮肤"));
         return;
     }
     case Selection::Constraint:
@@ -867,14 +1116,14 @@ void Editor::deleteSelection() {
         sk_.removeConstraint(sel_.index);
         physics_.reset();
         sel_.clear();
-        setStatus("已删除约束");
+        setStatus(tr("已删除约束"));
         return;
     case Selection::Image: {
         int img = sel_.index;
         for (auto& s : sk_.slots)
             for (auto& a : s.attachments)
                 if (a.image == img) {
-                    setStatus("图片仍被附件使用，不能删除");
+                    setStatus(tr("图片仍被附件使用，不能删除"));
                     return;
                 }
         checkpoint();
@@ -889,11 +1138,11 @@ void Editor::deleteSelection() {
     }
     case Selection::Bone: {
         if (mode_ != Mode::Setup) {
-            setStatus("请在 Setup 模式下删除骨骼");
+            setStatus(tr("请在 Setup 模式下删除骨骼"));
             return;
         }
         if (sk_.bones.size() == 1) {
-            setStatus("至少保留一根骨骼");
+            setStatus(tr("至少保留一根骨骼"));
             return;
         }
         checkpoint();
@@ -904,7 +1153,7 @@ void Editor::deleteSelection() {
         pending_.clear();
         selectBone(parent >= 0 && parent < (int)sk_.bones.size() ? parent : -1);
         validateSelection();
-        setStatus("已删除骨骼");
+        setStatus(tr("已删除骨骼"));
         return;
     }
     default:
@@ -951,14 +1200,15 @@ void Editor::moveAttachmentToSkin(int s, int a, int skin) {
     att = placeholder;
     if (std::find(activeSkins_.begin(), activeSkins_.end(), skin) == activeSkins_.end()) activeSkins_.push_back(skin);
     updatePose();
-    setStatus("已移入皮肤 " + target.name + "：其他皮肤可以为这个占位提供自己的附件");
+    setStatus(tr("已移入皮肤 ") + target.name + tr("：其他皮肤可以为这个占位提供自己的附件"));
 }
 
 // ---------------------------------------------------------------- compensation
 
 void Editor::transformBone(int bone, const Transform& local, bool rot, bool trans, bool scale, bool shear) {
     if (bone < 0 || bone >= (int)sk_.bones.size()) return;
-    Pose before = pose_;
+    Pose before;
+    if (compBones_ || compImages_) before = pose_;
     setBoneLocal(bone, local, rot, trans, scale, shear);
     if (!compBones_ && !compImages_) return;
     const Affine& newWorld = pose_.world[bone];
@@ -979,7 +1229,7 @@ void Editor::transformBone(int bone, const Transform& local, bool rot, bool tran
     }
     if (compImages_) {
         if (mode_ != Mode::Setup) {
-            setStatus("图片补偿只在 Setup 模式下生效");
+            setStatus(tr("图片补偿只在 Setup 模式下生效"));
             return;
         }
         // Attachments on the bone keep their world placement (unweighted ones; weighted
@@ -1000,7 +1250,7 @@ void Editor::transformBone(int bone, const Transform& local, bool rot, bool tran
 void Editor::bakePhysics(int only) {
     Animation* an = currentAnimation();
     if (!an || mode_ != Mode::Animate) {
-        setStatus("请在 Animate 模式下选择要烘焙的动画");
+        setStatus(tr("请在 Animate 模式下选择要烘焙的动画"));
         return;
     }
     std::vector<int> cons;
@@ -1008,7 +1258,7 @@ void Editor::bakePhysics(int only) {
         if (sk_.constraints[i].type == ConstraintType::Physics && (only < 0 || only == i) && !sk_.constraints[i].bones.empty())
             cons.push_back(i);
     if (cons.empty()) {
-        setStatus("没有可烘焙的物理约束");
+        setStatus(tr("没有可烘焙的物理约束"));
         return;
     }
     checkpoint();
@@ -1047,11 +1297,12 @@ void Editor::bakePhysics(int only) {
     }
     physics_.reset();
     updatePose();
-    setStatus("已烘焙 " + std::to_string(cons.size()) + " 个物理约束，" + std::to_string(frames + 1) + " 帧（该动画中物理混合已设为 0）");
+    setStatus(tr("已烘焙 ") + std::to_string(cons.size()) + tr(" 个物理约束，") + std::to_string(frames + 1) + tr(" 帧（该动画中物理混合已设为 0）"));
 }
 
 void Editor::mirrorSelectedWeights() {
     Attachment* att = selectedAttachment();
+    if (att && att->linkedAttachment>=0) return;
     if (!att || !att->isWeighted()) return;
     const Slot& slot = sk_.slots[sel_.slot];
     Pose setup = makeSetupPose(sk_);
@@ -1077,9 +1328,9 @@ void Editor::mirrorSelectedWeights() {
             ++pairs;
         }
     }
-    checkpoint();
+    checkpointAttachment();
     int changed = mirrorWeights(sk_, slot, *att, axis, mirrorLeftToRight_, mirror);
-    setStatus("已镜像 " + std::to_string(changed) + " 个顶点的权重（配对骨骼 " + std::to_string(pairs / 2) + " 对）");
+    setStatus(tr("已镜像 ") + std::to_string(changed) + tr(" 个顶点的权重（配对骨骼 ") + std::to_string(pairs / 2) + tr(" 对）"));
 }
 
 // ---------------------------------------------------------------- constraints
@@ -1102,11 +1353,11 @@ int Editor::addPathSlot(int bone, Vec2 a, Vec2 b) {
 int Editor::createConstraint(ConstraintType type) {
     int b = sel_.bone;
     if (b < 0 || b >= (int)sk_.bones.size()) {
-        setStatus("先选择要约束的骨骼");
+        setStatus(tr("先选择要约束的骨骼"));
         return -1;
     }
     if (mode_ != Mode::Setup) {
-        setStatus("请在 Setup 模式下新建约束");
+        setStatus(tr("请在 Setup 模式下新建约束"));
         return -1;
     }
     checkpoint();
@@ -1166,8 +1417,8 @@ int Editor::createConstraint(ConstraintType type) {
     int index = (int)sk_.constraints.size() - 1;
     selectConstraint(index);
     updatePose();
-    static const char* hints[] = {"已新建 IK 约束：移动目标骨骼 (V) 看效果", "已新建变换约束：移动/旋转目标骨骼看效果",
-                                  "已新建路径约束：用网格工具 (M) 编辑路径", "已新建物理约束：拖动父骨骼或播放动画看效果"};
+    const char* hints[] = {tr("已新建 IK 约束：移动目标骨骼 (V) 看效果"), tr("已新建变换约束：移动/旋转目标骨骼看效果"),
+                                  tr("已新建路径约束：用网格工具 (M) 编辑路径"), tr("已新建物理约束：拖动父骨骼或播放动画看效果")};
     setStatus(hints[(int)type]);
     return index;
 }
@@ -1195,15 +1446,20 @@ void Editor::setConstraintValues(int c, const ConstraintValues& v) {
 
 void Editor::afterTopologyChange(int slot, int attachment) {
     int dropped = sk_.dropStaleDeformKeys(slot, attachment);
-    if (dropped > 0) setStatus("顶点数变化，已删除 " + std::to_string(dropped) + " 个变形关键帧");
+    if (dropped > 0) {
+        setStatus(tr("顶点数变化，已删除 ") + std::to_string(dropped) + tr(" 个变形关键帧"));
+        reportIssue(Diagnostic{Severity::Warning, "DEFORM_KEYS_REMOVED", {}, std::to_string(dropped), IssueTarget::Attachment, slot, attachment});
+    }
+    issuesDirty_ = true;
     sel_.vertices.clear();
     updatePose();
 }
 
 void Editor::meshAddVertexAt(ImVec2 mouse) {
     Attachment* att = selectedAttachment();
+    if (att && att->linkedAttachment>=0) return;
     if (!att || !att->hasVertices()) {
-        setStatus("先选择一个网格、剪裁或边界框附件");
+        setStatus(tr("先选择一个网格、剪裁或边界框附件"));
         return;
     }
     int s = sel_.slot, a = attachmentIndex(s, att);
@@ -1211,7 +1467,7 @@ void Editor::meshAddVertexAt(ImVec2 mouse) {
     if (att->type == AttachmentType::Path) {
         // Paths grow by whole points: in-handle, point, out-handle, appended at the end.
         if (att->isWeighted()) {
-            setStatus("已绑定骨骼的路径不能加点，请先解除绑定");
+            failOperation("MESH_EDIT_FAILED", tr("已绑定骨骼的路径不能加点，请先解除绑定"), {}, IssueTarget::Attachment, s, a);
             return;
         }
         checkpoint();
@@ -1227,7 +1483,7 @@ void Editor::meshAddVertexAt(ImVec2 mouse) {
     }
     checkpoint();
     if (!att->isPolygon() && att->hullLength < 3 && !ensureHull(*att)) {
-        setStatus("这个网格有多个外轮廓，无法加顶点：请先“自动生成网格”");
+        failOperation("MESH_EDIT_FAILED", tr("这个网格有多个外轮廓，无法加顶点：请先“自动生成网格”"), {}, IssueTarget::Attachment, s, a);
         return;
     }
     Pose setup = makeSetupPose(sk_);
@@ -1257,6 +1513,7 @@ void Editor::meshAddVertexAt(ImVec2 mouse) {
 
 void Editor::meshDeleteSelectedVertices() {
     Attachment* att = selectedAttachment();
+    if (att && att->linkedAttachment>=0) return;
     if (!att || !att->hasVertices() || sel_.vertices.empty()) return;
     int s = sel_.slot, a = attachmentIndex(s, att);
     if (att->type == AttachmentType::Path) {
@@ -1267,7 +1524,7 @@ void Editor::meshDeleteSelectedVertices() {
         points.erase(std::unique(points.begin(), points.end()), points.end());
         int count = (int)att->vertexCount() / 3;
         if (count - (int)points.size() < 2 || att->isWeighted()) {
-            setStatus("路径至少需要 2 个点（已绑定的路径不能删点）");
+            failOperation("MESH_EDIT_FAILED", tr("路径至少需要 2 个点（已绑定的路径不能删点）"), {}, IssueTarget::Attachment, s, a);
             return;
         }
         checkpoint();
@@ -1279,7 +1536,7 @@ void Editor::meshDeleteSelectedVertices() {
     }
     checkpoint();
     if (!removeMeshVertices(sk_, sk_.slots[s], *att, sel_.vertices)) {
-        setStatus("外轮廓至少需要 3 个顶点");
+        failOperation("MESH_EDIT_FAILED", tr("外轮廓至少需要 3 个顶点"), {}, IssueTarget::Attachment, s, a);
         return;
     }
     afterTopologyChange(s, a);
@@ -1287,34 +1544,31 @@ void Editor::meshDeleteSelectedVertices() {
 
 bool Editor::autoMesh(int s, int a) {
     Attachment* target = editableAttachment(s, a);
+    if (target && target->linkedAttachment>=0) return false;
     if (!target) {
-        setStatus("皮肤占位没有被激活的皮肤填充");
-        return false;
+        return failOperation("MESH_EDIT_FAILED", tr("皮肤占位没有被激活的皮肤填充"), {}, IssueTarget::Attachment, s, a);
     }
     Attachment& att = *target;
-    if (att.image < 0 || att.image >= (int)textures_.size() || textures_[att.image].rgba.empty()) {
-        setStatus("图片未加载，无法生成网格");
-        return false;
+    if (att.image < 0 || att.image >= (int)textures_.size() || textures_[att.image].rgba().empty()) {
+        return failOperation("MESH_EDIT_FAILED", tr("图片未加载，无法生成网格"), {}, IssueTarget::Attachment, s, a);
     }
     const Texture& tex = textures_[att.image];
-    std::vector<Vec2> outline = traceAlphaOutline(tex.rgba.data(), tex.width, tex.height, 8, outlineTolerance_, outlinePadding_);
+    std::vector<Vec2> outline = traceAlphaOutline(tex.rgba().data(), tex.width, tex.height, 8, outlineTolerance_, outlinePadding_);
     if (outline.empty()) {
-        setStatus("图片完全透明，无法生成网格");
-        return false;
+        return failOperation("MESH_EDIT_FAILED", tr("图片完全透明，无法生成网格"), {}, IssueTarget::Attachment, s, a);
     }
     std::vector<int> bones = att.isWeighted() ? meshBones(att) : std::vector<int>{};
     Attachment copy = att;
     if (copy.isWeighted()) unbindMesh(sk_, sk_.slots[s], copy);
     float spacing = meshDensity_ > 0 ? std::max(tex.width, tex.height) / (float)meshDensity_ : 0.0f;
     if (!buildMeshFromOutline(sk_, sk_.slots[s], copy, sk_.images[att.image], outline, spacing)) {
-        setStatus("生成网格失败");
-        return false;
+        return failOperation("MESH_EDIT_FAILED", tr("生成网格失败"), {}, IssueTarget::Attachment, s, a);
     }
     if (!bones.empty()) bindMesh(sk_, sk_.slots[s], copy, bones);
     checkpoint();
     att = std::move(copy);
     afterTopologyChange(s, a);
-    setStatus("已生成网格：" + std::to_string(att.vertexCount()) + " 个顶点" + (bones.empty() ? "" : "，已按原骨骼重新绑定"));
+    setStatus(tr("已生成网格：") + std::to_string(att.vertexCount()) + tr(" 个顶点") + (bones.empty() ? "" : tr("，已按原骨骼重新绑定")));
     return true;
 }
 
@@ -1360,38 +1614,74 @@ void Editor::createPolygonAttachment(int s, AttachmentType type) {
     hiddenSlots_.clear();
     selectAttachment(index, 0);
     setTool(Tool::MeshEdit);
-    setStatus(clipping ? "已添加剪裁：拖动顶点调整形状，Alt+点击加顶点" : "已添加边界框：拖动顶点调整形状，Alt+点击加顶点");
+    setStatus(clipping ? tr("已添加剪裁：拖动顶点调整形状，Alt+点击加顶点") : tr("已添加边界框：拖动顶点调整形状，Alt+点击加顶点"));
 }
 
 // ---------------------------------------------------------------- close
 
+bool Editor::requestDocumentChange(std::function<bool()> change, bool preserveRecovery, bool closing) {
+    if (pendingDocumentChange_) return false;
+    if (dirty_) {
+        pendingDocumentChange_ = std::move(change);
+        pendingPreservesRecovery_ = preserveRecovery;
+        pendingIsClose_ = closing;
+        showCloseDialog_ = true;
+        return false;
+    }
+    const bool ok = change();
+    if (ok && !preserveRecovery) clearRecovery();
+    return ok;
+}
+
+bool Editor::resolveDocumentChange(ChangeDecision decision) {
+    if (!pendingDocumentChange_) return false;
+    if (decision == ChangeDecision::Cancel) {
+        pendingDocumentChange_ = {};
+        showCloseDialog_ = false;
+        return true;
+    }
+    if (decision == ChangeDecision::Save && !saveProject(false)) return false;
+    auto change = std::move(pendingDocumentChange_);
+    pendingDocumentChange_ = {};
+    const bool preserve = pendingPreservesRecovery_;
+    showCloseDialog_ = false;
+    const bool ok = change();
+    if (ok && !preserve) clearRecovery();
+    return ok;
+}
+
 bool Editor::requestClose() {
-    if (!dirty_ || closeConfirmed_) return true;
-    showCloseDialog_ = true;
+    if (closeConfirmed_) return true;
+    if (pendingDocumentChange_ || showRecoveryDialog_) return false;
+    if (!dirty_) return true;
+    requestDocumentChange([this] { closeConfirmed_ = true; return true; }, false, true);
     return false;
 }
 
 void Editor::drawCloseDialog() {
     if (showCloseDialog_) {
-        ImGui::OpenPopup("未保存的修改");
+        ImGui::OpenPopup(tr("未保存的修改"));
         showCloseDialog_ = false;
     }
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("未保存的修改", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("工程有未保存的修改，退出前要保存吗？");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal(tr("未保存的修改"), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(tr("当前工程有未保存的修改。"));
+        ImGui::TextUnformatted(tr("保存后继续，或明确放弃这些修改。"));
         ImGui::Spacing();
-        if (ImGui::Button("保存并退出")) {
-            if (saveProject(false)) closeConfirmed_ = true;
-            ImGui::CloseCurrentPopup();
+        if (ImGui::Button(pendingIsClose_ ? tr("保存并退出") : tr("保存并继续"))) {
+            resolveDocumentChange(ChangeDecision::Save);
+            if (!pendingDocumentChange_) ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("不保存")) {
-            closeConfirmed_ = true;
-            ImGui::CloseCurrentPopup();
+        if (ImGui::Button(tr("放弃修改"))) {
+            resolveDocumentChange(ChangeDecision::Discard);
+            if (!pendingDocumentChange_) ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("取消")) ImGui::CloseCurrentPopup();
+        if (ImGui::Button(tr("取消")) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            resolveDocumentChange(ChangeDecision::Cancel);
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 }
@@ -1409,10 +1699,7 @@ void Editor::handleShortcuts() {
         if (pressed(ImGuiKey_Y)) redo();
         if (pressed(ImGuiKey_S)) saveProject(shift);
         if (pressed(ImGuiKey_O)) openProjectDialog();
-        if (pressed(ImGuiKey_N)) {
-            if (!dirty_) newProject();
-            else setStatus("有未保存的修改，请先保存或从菜单新建");
-        }
+        if (pressed(ImGuiKey_N)) newProject();
         if (pressed(ImGuiKey_I)) importImageDialog();
         if (pressed(ImGuiKey_F)) shift ? frameAll() : zoomTo(1.0f);
         return;
@@ -1449,49 +1736,74 @@ void Editor::handleShortcuts() {
 
 void Editor::drawMenuBar() {
     if (!ImGui::BeginMainMenuBar()) return;
-    if (ImGui::BeginMenu("文件")) {
-        if (ImGui::MenuItem("新建", "Ctrl+N")) newProject();
-        if (ImGui::MenuItem("打开...", "Ctrl+O")) openProjectDialog();
-        if (ImGui::MenuItem("保存", "Ctrl+S")) saveProject(false);
-        if (ImGui::MenuItem("另存为...", "Ctrl+Shift+S")) saveProject(true);
+    if (ImGui::BeginMenu(tr("文件"))) {
+        if (ImGui::MenuItem(tr("新建"), "Ctrl+N")) newProject();
+        if (ImGui::MenuItem(tr("打开..."), "Ctrl+O")) openProjectDialog();
+        if (ImGui::MenuItem(tr("保存"), "Ctrl+S")) saveProject(false);
+        if (ImGui::MenuItem(tr("另存为..."), "Ctrl+Shift+S")) saveProject(true);
+        if (ImGui::MenuItem(tr("保存时收集工程资源"), nullptr, &settings_.collectResources)) saveSettings();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("将图片和事件音频复制到工程旁的资源文件夹；首次保存和另存为时也可选择。"));
         ImGui::Separator();
-        if (ImGui::MenuItem("导入图片...", "Ctrl+I")) importImageDialog();
-        if (ImGui::MenuItem("导入 PSD...")) io_.open = IoState::Psd;
-        if (ImGui::MenuItem("导入工程 / 数据（合并）...")) {
-            std::string path = openFileDialog("RigEditor 工程或数据 (*.rig.json;*.json;*.rigb)", "*.rig.json;*.json;*.rigb");
+        if (ImGui::MenuItem(tr("导入图片..."), "Ctrl+I")) importImageDialog();
+        if (ImGui::MenuItem(tr("导入 PSD..."))) io_.open = IoState::Psd;
+        if (ImGui::MenuItem(tr("批量重定位资源..."))) showResourceRelink_ = true;
+        if (ImGui::MenuItem(tr("导出中断恢复..."))) { refreshExportRecoveries(); showExportRecovery_ = true; }
+        if (ImGui::MenuItem(tr("导入工程 / 数据（合并）..."))) {
+            std::string path = openFileDialog(tr("Poseweaver 工程或数据 (*.rig.json;*.json;*.rigb)"), "*.rig.json;*.json;*.rigb");
             if (!path.empty()) importMergePath(path);
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("导出数据 (JSON / 二进制)...")) io_.open = IoState::Data;
-        if (ImGui::MenuItem("纹理打包...")) io_.open = IoState::Atlas;
-        if (ImGui::MenuItem("导出图片 / GIF / 视频...")) {
-            io_.imageAnim = anim_;
+        if (ImGui::MenuItem(tr("导出数据 (JSON / 二进制)..."))) io_.open = IoState::Data;
+        if (ImGui::MenuItem(tr("纹理打包..."))) io_.open = IoState::Atlas;
+        if (ImGui::MenuItem(tr("导出 Unity / Godot 帧动画..."))) io_.open = IoState::Engine;
+        if (ImGui::MenuItem(tr("导出 Unity / Godot 实时骨骼..."))) {
+            const auto path=saveFileDialog(tr("实时骨骼 (*.pwskeleton)"),"*.pwskeleton","pwskeleton");
+            if (!path.empty()) exportRuntimePath(path);
+        }
+        if (ImGui::MenuItem(tr("导出图片 / GIF / 视频..."))) {
             io_.open = IoState::Images;
         }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("编辑")) {
-        if (ImGui::MenuItem("撤销", "Ctrl+Z", false, !undo_.empty())) undo();
-        if (ImGui::MenuItem("重做", "Ctrl+Y", false, !redo_.empty())) redo();
+    if (ImGui::BeginMenu(tr("编辑"))) {
+        if (ImGui::MenuItem(tr("撤销"), "Ctrl+Z", false, !undo_.empty())) undo();
+        if (ImGui::MenuItem(tr("重做"), "Ctrl+Y", false, !redo_.empty())) redo();
+        if (ImGui::BeginMenu(tr("撤销内存预算"))) {
+            ImGui::Text(tr("快照容量 %.1f MiB / %d MiB"),undoMemoryBytes()/1048576.0,settings_.undoMemoryMiB);
+            for (int budget : {32,64,128,256,512}) {
+                std::string label = std::to_string(budget) + " MiB";
+                if (ImGui::MenuItem(label.c_str(),nullptr,settings_.undoMemoryMiB == budget)) {
+                    settings_.undoMemoryMiB = budget; trimUndoHistory(); saveSettings();
+                }
+            }
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
-        if (ImGui::MenuItem("删除所选", "Del")) deleteSelection();
-        if (ImGui::MenuItem("取消选择", "Esc")) sel_.clear();
+        if (ImGui::MenuItem(tr("删除所选"), "Del")) deleteSelection();
+        if (ImGui::MenuItem(tr("取消选择"), "Esc")) sel_.clear();
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("视图")) {
-        if (ImGui::MenuItem("适配骨架", "F")) frameAll();
-        if (ImGui::MenuItem("100% 缩放", "Ctrl+F")) zoomTo(1.0f);
-        if (ImGui::MenuItem("重置窗口布局")) resetLayout_ = true;
+    if (ImGui::BeginMenu(tr("视图"))) {
+        ImGui::MenuItem(tr("光源与像素..."), nullptr, &showEffects_);
+        if (ImGui::MenuItem(tr("适配骨架"), "F")) frameAll();
+        if (ImGui::MenuItem(tr("100% 缩放"), "Ctrl+F")) zoomTo(1.0f);
+        if (ImGui::MenuItem(tr("重置窗口布局"))) resetLayout_ = true;
+        if (ImGui::MenuItem(tr("问题面板"), nullptr, showIssues_)) {
+            showIssues_ = !showIssues_;
+            issuesDirty_ = true;
+        }
+        if (ImGui::MenuItem(tr("恢复自动保存..."), nullptr, false, recoveryAvailable_)) showRecoveryDialog_ = true;
+        drawLanguageMenu();
         ImGui::Separator();
         ImGui::MenuItem("ImGui Demo", nullptr, &showDemo_);
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("帮助")) {
-        if (ImGui::MenuItem("启动页...")) openSplash();
-        if (ImGui::MenuItem("快捷键...")) showShortcuts_ = true;
+    if (ImGui::BeginMenu(tr("帮助"))) {
+        if (ImGui::MenuItem(tr("启动页..."))) openSplash();
+        if (ImGui::MenuItem(tr("快捷键..."))) showShortcuts_ = true;
         ImGui::EndMenu();
     }
-    std::string title = projectPath_.empty() ? "未命名" : fs::u8path(projectPath_).filename().u8string();
+    std::string title = projectPath_.empty() ? tr("未命名") : fs::u8path(projectPath_).filename().u8string();
     if (dirty_) title += " *";
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::CalcTextSize(title.c_str()).x - 16);
     ImGui::TextDisabled("%s", title.c_str());
@@ -1505,17 +1817,22 @@ void Editor::drawStatusBar() {
         if (ImGui::BeginMenuBar()) {
             ImGui::TextUnformatted(mode_ == Mode::Setup ? "Setup" : "Animate");
             ImGui::Separator();
-            ImGui::Text("骨骼 %d  插槽 %d  动画 %d", (int)sk_.bones.size(), (int)sk_.slots.size(),
+            ImGui::Text(tr("骨骼 %d  插槽 %d  动画 %d"), (int)sk_.bones.size(), (int)sk_.slots.size(),
                         (int)sk_.animations.size());
+            if (!issues_.empty()) {
+                ImGui::Separator();
+                const std::string label = tr("问题 ") + std::to_string(issues_.size());
+                if (ImGui::MenuItem(label.c_str())) openIssues();
+            }
             if (!sk_.skins.empty()) {
                 ImGui::Separator();
                 std::string names;
                 for (int k : activeSkins_) names += (names.empty() ? "" : " + ") + sk_.skins[k].name;
-                ImGui::Text("皮肤: %s", names.empty() ? "(无)" : names.c_str());
+                ImGui::Text(tr("皮肤: %s"), names.empty() ? tr("(无)") : names.c_str());
             }
             if (!pending_.empty()) {
                 ImGui::Separator();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(theme::kKeyChanged), "有未打帧的改动（K 打帧）");
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(theme::kKeyChanged), tr("有未打帧的改动（K 打帧）"));
             }
             if (statusTime_ > 0) {
                 ImGui::Separator();
@@ -1566,7 +1883,15 @@ void Editor::frameAll() {
 // ---------------------------------------------------------------- demo
 
 void Editor::buildDemo(const std::string& imagePath, float time, const std::string& scenario) {
-    newProject();
+    requestDocumentChange([this, imagePath, time, scenario] {
+        buildDemoNow(imagePath, time, scenario);
+        if (!dirty_) markSaved();
+        return !sk_.slots.empty();
+    });
+}
+
+void Editor::buildDemoNow(const std::string& imagePath, float time, const std::string& scenario) {
+    resetProject();
     if (!importImage(imagePath)) return;
     Transform upper;
     upper.y = -120;
@@ -1579,9 +1904,9 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
     Slot& slot = sk_.slots[0];
     Attachment& att = slot.attachments[0];
     const Texture& tex = textures_[att.image];
-    std::vector<Vec2> outline = traceAlphaOutline(tex.rgba.data(), tex.width, tex.height, 8, 2.0f, 2.0f);
+    std::vector<Vec2> outline = traceAlphaOutline(tex.rgba().data(), tex.width, tex.height, 8, 2.0f, 2.0f);
     if (!buildMeshFromOutline(sk_, slot, att, sk_.images[att.image], outline, tex.height / 12.0f))
-        convertRegionToMesh(att, sk_.images[att.image], tex.rgba.data(), 3, 12);
+        convertRegionToMesh(att, sk_.images[att.image], tex.rgba().data(), 3, 12);
     bindMesh(sk_, slot, att, {up, low});
 
     Animation an;
@@ -1623,6 +1948,7 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
     }
     sk_.animations.push_back(an);
     anim_ = 0;
+    io_.imageAnim = 0;
 
     undo_.clear();
     redo_.clear();
@@ -1636,7 +1962,7 @@ void Editor::buildDemo(const std::string& imagePath, float time, const std::stri
         Texture altTex;
         std::string err;
         if (loadTexture(alt, altTex, &err)) {
-            sk_.images.push_back({alt, altTex.width, altTex.height});
+            sk_.images.push_back({fs::absolute(fs::u8path(alt)).lexically_normal().u8string(), altTex.width, altTex.height});
             textures_.push_back(std::move(altTex));
             Attachment copy = *sk_.skins[blue].find(0, "arm");
             copy.name = "arm_plain";

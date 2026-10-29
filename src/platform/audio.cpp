@@ -66,8 +66,8 @@ struct AudioPlayer::Impl {
     }
 };
 
-AudioPlayer::AudioPlayer() : impl_(new Impl) {
-    impl_->engineOk = ma_engine_init(nullptr, &impl_->engine) == MA_SUCCESS;
+AudioPlayer::AudioPlayer(bool playback) : impl_(new Impl) {
+    impl_->engineOk = playback && ma_engine_init(nullptr, &impl_->engine) == MA_SUCCESS;
 }
 
 AudioPlayer::~AudioPlayer() {

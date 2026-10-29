@@ -49,8 +49,26 @@ static V sampleLerp(const std::vector<K>& keys, float t, V fallback) {
 }
 
 float sample(const std::vector<FloatKey>& keys, float t, float fallback) { return sampleLerp(keys, t, fallback); }
-Vec2 sample(const std::vector<Vec2Key>& keys, float t, Vec2 fallback) { return sampleLerp(keys, t, fallback); }
-Color sample(const std::vector<ColorKey>& keys, float t, const Color& fallback) { return sampleLerp(keys, t, fallback); }
+template<class K,class Value> static float sampleComponent(const std::vector<K>& keys,int component,float time,float fallback,Value value) {
+    const K *before = nullptr, *after = nullptr;
+    auto next = std::upper_bound(keys.begin(),keys.end(),time,[](float t,const K& key) { return t < key.time; });
+    for (auto i = next; i != keys.begin();) { --i; if (i->componentMask & (1u << component)) { before = &*i; break; } }
+    for (auto i = next; i != keys.end(); ++i) if (i->componentMask & (1u << component)) { after = &*i; break; }
+    if (!before) return after ? value(*after) : fallback;
+    if (!after) return value(*before);
+    float span = after->time-before->time;
+    float f = applyCurve(componentCurve(*before,component),span > 1e-8f ? (time-before->time)/span : 0);
+    return value(*before)+(value(*after)-value(*before))*f;
+}
+Vec2 sample(const std::vector<Vec2Key>& keys, float t, Vec2 fallback) {
+    return {sampleComponent(keys,0,t,fallback.x,[](const Vec2Key& k) { return k.value.x; }),
+            sampleComponent(keys,1,t,fallback.y,[](const Vec2Key& k) { return k.value.y; })};
+}
+Color sample(const std::vector<ColorKey>& keys, float t, const Color& fallback) {
+    Color result;
+    for (int c = 0; c < 4; ++c) result[c] = sampleComponent(keys,c,t,fallback[c],[c](const ColorKey& k) { return k.value[c]; });
+    return result;
+}
 
 int sample(const std::vector<IntKey>& keys, float t, int fallback) {
     if (keys.empty()) return fallback;
@@ -63,31 +81,52 @@ void applyAnimation(const Skeleton& sk, const Animation& anim, float time, Pose&
         if (bi < 0 || bi >= (int)sk.bones.size()) continue;
         const Transform& s = sk.bones[bi].setup;
         Transform& l = pose.local[bi];
-        l.rotation = s.rotation + sample(tl.rotate, time, 0.0f);
-        Vec2 tr = sample(tl.translate, time, Vec2{});
+        if (!tl.rotate.empty()) l.rotation = s.rotation + sample(tl.rotate, time, 0.0f);
+        Vec2 tr = sample(tl.translate, time, Vec2{l.x-s.x,l.y-s.y});
         l.x = s.x + tr.x;
         l.y = s.y + tr.y;
-        Vec2 sc = sample(tl.scale, time, Vec2{1, 1});
-        l.scaleX = s.scaleX * sc.x;
-        l.scaleY = s.scaleY * sc.y;
-        Vec2 sh = sample(tl.shear, time, Vec2{});
+        Vec2 sc = sample(tl.scale, time, Vec2{s.scaleX != 0 ? l.scaleX/s.scaleX : 1,s.scaleY != 0 ? l.scaleY/s.scaleY : 1});
+        if (!tl.scale.empty()) {
+            unsigned mask = 0; for (const auto& key : tl.scale) mask |= key.componentMask;
+            if (mask & 1) l.scaleX = s.scaleX * sc.x;
+            if (mask & 2) l.scaleY = s.scaleY * sc.y;
+        }
+        Vec2 sh = sample(tl.shear, time, Vec2{l.shearX-s.shearX,l.shearY-s.shearY});
         l.shearX = s.shearX + sh.x;
         l.shearY = s.shearY + sh.y;
     }
     for (auto& [si, tl] : anim.slots) {
         if (si < 0 || si >= (int)sk.slots.size()) continue;
-        int a = sample(tl.attachment, time, sk.slots[si].activeAttachment);
-        pose.slotAttachment[si] = a < (int)sk.slots[si].attachments.size() ? a : -1;
-        pose.slotColor[si] = sample(tl.color, time, sk.slots[si].color);
-        for (auto& [ai, keys] : tl.deform) {
-            if (keys.empty() || ai < 0 || ai >= (int)sk.slots[si].attachments.size()) continue;
-            size_t n = sk.slots[si].attachments[ai].vertexCount();
-            int i = keyBefore(keys, time);
-            const DeformKey& k0 = keys[std::max(i, 0)];
+        if (!tl.attachment.empty()) {
+            int a = sample(tl.attachment, time, pose.slotAttachment[si]);
+            pose.slotAttachment[si] = a < (int)sk.slots[si].attachments.size() ? a : -1;
+        }
+        pose.slotColor[si] = sample(tl.color, time, pose.slotColor[si]);
+        for (int ai=0;ai<(int)sk.slots[si].attachments.size();++ai) {
+            const auto* shown=sk.resolve(pose.skins,si,ai); if (!shown) continue;
+            const auto* geometry=shown->linkedAttachment>=0 ? sk.meshSource(si,*shown) : shown; if (!geometry) continue;
+            const Attachment* owner=shown;
+            std::vector<const Attachment*> visited;
+            int sourceIndex=ai;
+            while (owner->linkedAttachment>=0 && owner->inheritDeform) {
+                if (std::find(visited.begin(),visited.end(),owner)!=visited.end()) { owner=nullptr; break; }
+                visited.push_back(owner); sourceIndex=owner->linkedAttachment;
+                owner=sk.attachmentAt(si,sourceIndex,owner->linkedSkin); if (!owner) break;
+            }
+            if (!owner) continue;
+            auto sourceTrack=tl.deform.find(sourceIndex); if (sourceTrack==tl.deform.end()) continue;
+            const int skin=sk.attachmentSkin(si,owner);
+            std::vector<const DeformKey*> selected;
+            for (const auto& key : sourceTrack->second) if (key.skin==skin) selected.push_back(&key);
+            if (selected.empty()) for (const auto& key : sourceTrack->second) if (key.skin==-2) selected.push_back(&key);
+            if (selected.empty()) continue;
+            size_t n = geometry->vertexCount();
+            int i=(int)(std::upper_bound(selected.begin(),selected.end(),time,[](float t,const DeformKey* key) { return t<key->time; })-selected.begin())-1;
+            const DeformKey& k0 = *selected[std::max(i, 0)];
             if (k0.value.size() != n) continue;
             std::vector<Vec2> offsets = k0.value;
-            if (i >= 0 && i + 1 < (int)keys.size() && keys[i + 1].value.size() == n) {
-                const DeformKey& k1 = keys[i + 1];
+            if (i >= 0 && i + 1 < (int)selected.size() && selected[i + 1]->value.size() == n) {
+                const DeformKey& k1 = *selected[i + 1];
                 float span = k1.time - k0.time;
                 float f = applyCurve(k0.curve, span > 1e-8f ? (time - k0.time) / span : 0.0f);
                 for (size_t v = 0; v < n; ++v) offsets[v] = k0.value[v] + (k1.value[v] - k0.value[v]) * f;
@@ -212,6 +251,13 @@ Affine deformBasis(const Pose& pose, const Slot& slot, const Attachment& att, in
 
 std::vector<Vec2> computeVertices(const Skeleton& sk, const Pose& pose, const Slot& slot, const Attachment& att,
                                   const std::vector<Vec2>* deform) {
+    if (att.linkedAttachment>=0) {
+        for (int s=0;s<(int)sk.slots.size();++s) if (&sk.slots[s]==&slot) {
+            const auto* source=sk.meshSource(s,att);
+            return source ? computeVertices(sk,pose,slot,*source,deform) : std::vector<Vec2>{};
+        }
+        return {};
+    }
     std::vector<Vec2> out;
     const Affine& boneWorld = pose.world[slot.bone];
     if (att.type == AttachmentType::Region) {
@@ -252,8 +298,13 @@ void computeGeometry(const Skeleton& sk, const Pose& pose, const Slot& slot, con
         out.uvs.clear();
         out.triangles.clear();
     } else {
-        out.uvs = att.uvs;
-        out.triangles = att.triangles;
+        const Attachment* source=&att;
+        if (att.linkedAttachment>=0) {
+            source=nullptr;
+            for (int s=0;s<(int)sk.slots.size();++s) if (&sk.slots[s]==&slot) source=sk.meshSource(s,att);
+        }
+        out.uvs = source ? source->uvs : std::vector<Vec2>{};
+        out.triangles = source ? source->triangles : std::vector<int>{};
     }
 }
 

@@ -4,3 +4,13 @@ out/
 *.user
 imgui.ini
 dist/
+integrations/**/.godot/
+claude-export*/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx

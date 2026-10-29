@@ -1,10 +1,10 @@
-; Inno Setup 6 script for RigEditor. Normally run by scripts\package.ps1, which passes
+; Inno Setup 6 script for Poseweaver. Normally run by scripts\package.ps1, which passes
 ; /DAppVersion, /DSourceDir (the packaged folder), /DOutputDir and /DIconFile.
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
 #ifndef SourceDir
-  #define SourceDir "..\dist\RigEditor-" + AppVersion + "-win64"
+  #define SourceDir "..\dist\Poseweaver-" + AppVersion + "-win64"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist"
@@ -14,13 +14,14 @@
 #endif
 
 [Setup]
+; Keep the application ID so existing installations can upgrade.
 AppId={{6C1D9F3A-58E2-4E0B-9D3B-2F7A4C1E8B52}
-AppName=RigEditor
+AppName=Poseweaver
 AppVersion={#AppVersion}
-AppVerName=RigEditor {#AppVersion}
+AppVerName=Poseweaver {#AppVersion}
 AppPublisher=YuanLu
-DefaultDirName={autopf}\RigEditor
-DefaultGroupName=RigEditor
+DefaultDirName={autopf}\Poseweaver
+DefaultGroupName=Poseweaver
 DisableProgramGroupPage=yes
 ; Lets the user choose between installing for everyone (admin) or just for themselves.
 PrivilegesRequired=lowest
@@ -28,9 +29,9 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=RigEditor-{#AppVersion}-setup
+OutputBaseFilename=Poseweaver-{#AppVersion}-setup
 SetupIconFile={#IconFile}
-UninstallDisplayIcon={app}\RigEditor.exe
+UninstallDisplayIcon={app}\Poseweaver.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -47,9 +48,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+Type: files; Name: "{app}\RigEditor.exe"
+Type: files; Name: "{autoprograms}\RigEditor.lnk"
+Type: files; Name: "{autodesktop}\RigEditor.lnk"
+
 [Icons]
-Name: "{autoprograms}\RigEditor"; Filename: "{app}\RigEditor.exe"
-Name: "{autodesktop}\RigEditor"; Filename: "{app}\RigEditor.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Poseweaver"; Filename: "{app}\Poseweaver.exe"
+Name: "{autodesktop}\Poseweaver"; Filename: "{app}\Poseweaver.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\RigEditor.exe"; Description: "{cm:LaunchProgram,RigEditor}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Poseweaver.exe"; Description: "{cm:LaunchProgram,Poseweaver}"; Flags: nowait postinstall skipifsilent

@@ -1,9 +1,11 @@
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "core/clipping.h"
 #include "core/constraints.h"
 #include "core/mesh_tools.h"
 #include "editor/theme.h"
+#include "platform/blend.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -148,6 +150,11 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
     drag_.startScreen = mouse;
     drag_.startWorld = toWorld(mouse);
     drag_.tool = tool_;
+    if (auto* selected=selectedAttachment(); selected && selected->linkedAttachment>=0 &&
+        ((mode_==Mode::Setup && (tool_==Tool::MeshEdit || tool_==Tool::Weights)) ||
+         (mode_==Mode::Animate && tool_==Tool::MeshEdit && selected->inheritDeform))) {
+        setStatus(tr("关联网格的几何与权重由源网格控制；先解除关联，或关闭继承变形后编辑自己的动画。")); return;
+    }
 
     auto beginBoneDrag = [&](int b, Tool tool) {
         drag_.kind = Drag::Bone;
@@ -272,7 +279,7 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
             int a = s < (int)pose_.slotAttachment.size() ? pose_.slotAttachment[s] : sk_.slots[s].activeAttachment;
             selectAttachment(s, a);
             Attachment* att = selectedAttachment();
-            if (!att || !att->hasVertices()) setStatus("所选附件不是网格：在属性面板点“自动生成网格”");
+            if (!att || !att->hasVertices()) setStatus(tr("所选附件不是网格：在属性面板点“自动生成网格”"));
             return;
         }
         if (!shift) sel_.vertices.clear();
@@ -290,12 +297,12 @@ void Editor::viewportMouseDown(ImVec2 mouse, bool shift, bool ctrl) {
                 att = selectedAttachment();
             }
             if (!att || !att->isWeighted()) {
-                setStatus("请选择已绑定骨骼的网格（属性面板 → 绑定骨骼）");
+                setStatus(tr("请选择已绑定骨骼的网格（属性面板 → 绑定骨骼）"));
                 return;
             }
         }
         if (sel_.bone < 0) {
-            setStatus("请先在权重视图里选一根骨骼");
+            setStatus(tr("请先在权重视图里选一根骨骼"));
             return;
         }
         drag_.kind = Drag::Paint;
@@ -309,7 +316,9 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
     drag_.moved = true;
     auto ensureCheckpoint = [&] {
         if (!drag_.checkpointed) {
-            checkpoint();
+            if (drag_.kind == Drag::Bone || drag_.kind == Drag::PoseRotate || drag_.kind == Drag::BoneLength) checkpointBone(sel_.bone);
+            else if (drag_.kind == Drag::Attachment || drag_.kind == Drag::Vertices || drag_.kind == Drag::Paint) checkpointAttachment();
+            else checkpoint();
             drag_.checkpointed = true;
         }
     };
@@ -416,7 +425,7 @@ void Editor::viewportDrag(ImVec2 mouse, bool shift, bool ctrl, float dt) {
                 if (v < (int)offsets.size() && v < (int)drag_.deformBases.size())
                     offsets[v] = drag_.startOffsets[v] + drag_.deformBases[v].applyVector(worldDelta);
             if (!currentAnimation()) createAnimation();
-            setDeformKey(*currentAnimation(), sel_.slot, attachmentIndex(sel_.slot, att), time_, offsets);
+            setDeformKey(*currentAnimation(), sel_.slot, attachmentIndex(sel_.slot, att), time_, offsets,sk_.attachmentSkin(sel_.slot,att));
             break;
         }
         Pose setup = makeSetupPose(sk_);
@@ -494,6 +503,7 @@ void Editor::viewportMouseUp(ImVec2 mouse, bool shift) {
 
 void Editor::drawSlots(ImDrawList* dl) {
     if (!view_.imagesVisible) return;
+    const bool effects = effectsActive(sk_.effects) && drawEffectsPreview(dl);
     Geometry g, clipped;
     ClipTriangles clip;
     int clipEnd = -2;  // -2: no clipping active
@@ -547,16 +557,21 @@ void Editor::drawSlots(ImDrawList* dl) {
             std::swap(g, clipped);
         }
         bool hasTex = att.image >= 0 && att.image < (int)textures_.size() && textures_[att.image].id;
-        if (hasTex && !g.triangles.empty()) {
+        if (!effects && hasTex && !g.triangles.empty()) {
             const Color& c = s < (int)pose_.slotColor.size() ? pose_.slotColor[s] : slot.color;
-            ImU32 col = ImGui::ColorConvertFloat4ToU32({c[0], c[1], c[2], c[3]});
-            dl->PushTextureID((ImTextureID)(intptr_t)textures_[att.image].id);
+            bool premultiplied = slot.blend != BlendMode::Normal;
+            float alpha = premultiplied ? c[3] : 1.0f;
+            ImU32 col = ImGui::ColorConvertFloat4ToU32({c[0] * alpha, c[1] * alpha, c[2] * alpha, c[3]});
+            unsigned int texture = premultiplied ? textures_[att.image].premultiplied() : textures_[att.image].id;
+            beginSlotBlend(dl, slot.blend);
+            dl->PushTextureID((ImTextureID)(intptr_t)texture);
             dl->PrimReserve((int)g.triangles.size(), (int)g.positions.size());
             unsigned int base = dl->_VtxCurrentIdx;
             for (size_t v = 0; v < g.positions.size(); ++v)
                 dl->PrimWriteVtx(toScreen(g.positions[v]), toIm(g.uvs[v]), col);
             for (int idx : g.triangles) dl->PrimWriteIdx((ImDrawIdx)(base + idx));
             dl->PopTextureID();
+            if (premultiplied) dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         }
         bool selected = s == sel_.slot && (sel_.kind == Selection::Slot || sel_.kind == Selection::Attachment);
         if ((!hasTex || selected) && att.type == AttachmentType::Region && g.positions.size() == 4) {
@@ -614,7 +629,7 @@ void Editor::drawMeshOverlay(ImDrawList* dl) {
         dl->AddPolyline(sp.data(), hull, editing ? IM_COL32(255, 255, 255, 210) : IM_COL32(255, 255, 255, 90), ImDrawFlags_Closed,
                         1.8f * uiScale_);
     if (editing && tool_ == Tool::MeshEdit && mode_ == Mode::Setup && ImGui::GetIO().KeyAlt)
-        dl->AddText(ImGui::GetIO().MousePos + ImVec2(14, 4), IM_COL32(255, 255, 255, 220), "+ 顶点");
+        dl->AddText(ImGui::GetIO().MousePos + ImVec2(14, 4), IM_COL32(255, 255, 255, 220), tr("+ 顶点"));
     if (!editing) return;
     for (size_t v = 0; v < sp.size(); ++v) {
         bool sel = std::find(sel_.vertices.begin(), sel_.vertices.end(), (int)v) != sel_.vertices.end();
@@ -771,7 +786,7 @@ void Editor::drawConstraints(ImDrawList* dl) {
 
 void Editor::drawViewport() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    bool open = ImGui::Begin("视口###Viewport", nullptr,
+    bool open = ImGui::Begin(tr("视口###Viewport"), nullptr,
                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse);
     ImGui::PopStyleVar();
     if (!open) {

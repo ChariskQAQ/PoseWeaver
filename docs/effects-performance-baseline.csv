@@ -1,0 +1,4 @@
+case,width,height,samples,cpu_effect_ms_median,gpu_upload_effect_finish_ms_median
+light,512,512,9,4.2793,0.5776
+pixel16,512,512,9,18.2291,0.8046
+light_pixel16,512,512,9,23.2633,0.7691

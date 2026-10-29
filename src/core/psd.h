@@ -1,4 +1,5 @@
 #pragma once
+#include "core/model.h"
 // Minimal Photoshop (.psd) reader: 8-bit RGB documents, raster layers (raw or RLE), layer
 // names (including Unicode), group paths, visibility and opacity.
 #include <cstdint>
@@ -13,6 +14,8 @@ struct PsdLayer {
     int left = 0, top = 0, width = 0, height = 0;  // document pixels, y down
     bool visible = true;
     float opacity = 1;
+    BlendMode blend = BlendMode::Normal;
+    std::string blendKey = "norm";
     std::vector<unsigned char> rgba;  // width * height * 4
 };
 

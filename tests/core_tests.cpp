@@ -10,10 +10,12 @@
 #include "core/mesh_tools.h"
 #include "core/pose.h"
 #include "core/serialize.h"
+#include "core/diagnostics.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 using namespace rig;
 
@@ -28,6 +30,7 @@ static int g_failures = 0;
 
 static bool near(float a, float b, float eps = 1e-3f) { return std::fabs(a - b) < eps; }
 static bool near(Vec2 a, Vec2 b, float eps = 1e-3f) { return near(a.x, b.x, eps) && near(a.y, b.y, eps); }
+#include "linked_mesh_tests.h"
 
 static Skeleton makeArm() {
     Skeleton sk;
@@ -950,6 +953,69 @@ static void testRaster() {
     CHECK(std::search(gif.begin(), gif.end(), std::begin("NETSCAPE2.0"), std::end("NETSCAPE2.0") - 1) != gif.end());
 }
 
+static void testBlendModes() {
+    Skeleton sk;
+    sk.addBone("root", -1, {}, 0);
+    sk.images.push_back({"solid.png", 4, 4});
+    Slot slot;
+    slot.name = "art";
+    slot.attachments.push_back({});
+    slot.attachments[0].image = 0;
+    slot.activeAttachment = 0;
+    slot.color[3] = 0.5f;
+    sk.slots.push_back(slot);
+    const unsigned char pixel[] = {204, 102, 51, 255};
+    std::vector<RasterTexture> textures{{1, 1, pixel}};
+    const float expected[4][3] = {{0.5f, 0.4f, 0.4f}, {0.6f, 0.6f, 0.7f},
+                                  {0.18f, 0.28f, 0.36f}, {0.52f, 0.52f, 0.64f}};
+    for (int mode = 0; mode < 4; ++mode) {
+        sk.slots[0].blend = (BlendMode)mode;
+        if (mode == 0) {
+            CHECK(toJson(sk, -1).find("\"version\":5") != std::string::npos);
+            CHECK(toJson(sk, -1).find("\"blend\"") == std::string::npos);
+        }
+        std::vector<unsigned char> image(4 * 4 * 4);
+        for (int p = 0; p < 16; ++p) {
+            image[p * 4] = 51; image[p * 4 + 1] = 102; image[p * 4 + 2] = 153; image[p * 4 + 3] = 255;
+        }
+        renderPose(sk, makeSetupPose(sk), textures, Affine{1, 0, 0, 1, 2, 2}, 4, 4, image);
+        // Includes every shared diagonal pixel: exactly one blend per layer.
+        for (int p = 0; p < 16; ++p) {
+            for (int c = 0; c < 3; ++c) CHECK(std::abs(image[p * 4 + c] - expected[mode][c] * 255) <= 1);
+            CHECK(image[p * 4 + 3] == 255);
+        }
+        image.clear();
+        renderPose(sk, makeSetupPose(sk), textures, Affine{1, 0, 0, -1, 2, 2}, 4, 4, image);
+        for (int p = 0; p < 16; ++p) {
+            for (int c = 0; c < 3; ++c) CHECK(std::abs(image[p * 4 + c] - pixel[c]) <= 1);
+            CHECK(std::abs(image[p * 4 + 3] - 128) <= 1);
+        }
+        Skeleton loaded;
+        std::string error;
+        CHECK(fromJson(toJson(sk), loaded, &error) && loaded.slots[0].blend == (BlendMode)mode);
+        CHECK(fromBinary(toBinary(sk), loaded, &error) && loaded.slots[0].blend == (BlendMode)mode);
+        Skeleton merged;
+        mergeSkeleton(merged, sk);
+        CHECK(merged.slots.size() == 1 && merged.slots[0].blend == (BlendMode)mode);
+    }
+    Skeleton loaded;
+    std::string error;
+    std::string legacy = toJson(sk, -1);
+    const auto blend = legacy.find("\"blend\":\"screen\",");
+    CHECK(blend != std::string::npos);
+    if (blend != std::string::npos) legacy.erase(blend, std::string("\"blend\":\"screen\",").size());
+    const auto version = legacy.find("\"version\":6");
+    if (version != std::string::npos) legacy.replace(version, 11, "\"version\":5");
+    CHECK(fromJson(legacy, loaded, &error) && loaded.slots[0].blend == BlendMode::Normal);
+    std::string invalid = toJson(sk, -1);
+    invalid.replace(invalid.find("\"screen\""), 8, "\"overlay\"");
+    const std::string before = toJson(loaded);
+    CHECK(!fromJson(invalid, loaded, &error) && error.find("blend mode") != std::string::npos);
+    CHECK(toJson(loaded) == before);
+    sk.slots[0].blend = (BlendMode)99;
+    CHECK(!validateSkeleton(sk, &error));
+}
+
 static void testBinaryAndRounding() {
     Skeleton sk = makeMeshRig();
     convertRegionToMesh(sk.slots[0].attachments[0], sk.images[0], nullptr, 2, 3);
@@ -1102,6 +1168,18 @@ static void testPsd() {
     const PsdLayer& hat = doc.layers[1];
     CHECK(hat.name == "hat" && !hat.visible && hat.width == 3);
     CHECK(hat.rgba[(1 * 3 + 2) * 4 + 0] == 10 && hat.rgba[(1 * 3 + 2) * 4 + 3] == 128);
+    CHECK(bg.blend == BlendMode::Normal);
+    for (const auto& entry : std::vector<std::pair<std::string, BlendMode>>{
+             {"lddg", BlendMode::Additive}, {"mul ", BlendMode::Multiply}, {"scrn", BlendMode::Screen}, {"over", BlendMode::Normal}}) {
+        auto modified = w.b;
+        const std::string signature = "8BIMnorm";
+        auto mode = std::search(modified.begin(), modified.end(), signature.begin(), signature.end());
+        CHECK(mode != modified.end());
+        if (mode != modified.end()) std::copy(entry.first.begin(), entry.first.end(), mode + 4);
+        PsdDocument modes;
+        CHECK(parsePsd(modified, modes, &err));
+        CHECK(modes.layers[0].blend == entry.second && modes.layers[0].blendKey == entry.first);
+    }
     std::vector<uint8_t> bad = w.b;
     bad[0] = 'X';
     CHECK(!parsePsd(bad, doc, &err));
@@ -1283,7 +1361,157 @@ static void testAnimationState() {
     CHECK(near(q.local[1].rotation, 97.5f));
 }
 
+static void testRenderEffects() {
+    auto flat = [](int w, int h) {
+        std::vector<unsigned char> image(size_t(w) * h * 4, 128);
+        for (size_t i = 3; i < image.size(); i += 4) image[i] = 255;
+        return image;
+    };
+    RenderEffects e;
+    auto original = flat(8,8), pixels = original;
+    applyRenderEffects(pixels, 8, 8, {}, e);
+    CHECK(pixels == original);
+    e.light.enabled = true; e.light.position = {1.5f,0.5f}; e.light.radius = 2; e.light.intensity = 1; e.light.ambient = 0;
+    pixels = flat(3,1); pixels[3] = 0; pixels[7] = 128;
+    applyRenderEffects(pixels,3,1,{},e);
+    CHECK(pixels[3] == 0 && pixels[7] == 128 && pixels[4] == 128 && pixels[8] == 32);
+    e.light.color = {1,0,0}; e.light.ambient = 0.25f;
+    pixels = flat(3,1); applyRenderEffects(pixels,3,1,{},e);
+    CHECK(pixels[4] == 160 && pixels[5] == 32 && pixels[6] == 32);
+    e = {}; e.pixel.enabled = true; e.pixel.size = 1; e.pixel.dither = true;
+    e.pixel.palette = {{0,0,0},{1,1,1}};
+    pixels = original; applyRenderEffects(pixels,8,8,{},e);
+    auto crop = flat(4,4); applyRenderEffects(crop,4,4,{1,0,0,1,-2,-2},e);
+    int white = 0, black = 0;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        CHECK(pixels[i] == 0 || pixels[i] == 255);
+        white += pixels[i] == 255; black += pixels[i] == 0;
+    }
+    CHECK(white > 0 && black > 0);
+    for (int y = 0; y < 4; ++y) for (int x = 0; x < 4; ++x) for (int c = 0; c < 4; ++c)
+        CHECK(crop[(y * 4 + x) * 4 + c] == pixels[((y + 2) * 8 + x + 2) * 4 + c]);
+    auto again = original; applyRenderEffects(again,8,8,{},e); CHECK(again == pixels);
+    e.pixel.dither = false; e.pixel.quantize = false; e.pixel.size = 2;
+    pixels = flat(4,4);
+    for (size_t i = 0; i < 16; ++i) pixels[i * 4] = (unsigned char)(i * 10);
+    applyRenderEffects(pixels,4,4,{},e);
+    CHECK(pixels[0] == pixels[4] && pixels[0] == pixels[16] && pixels[0] != pixels[8]);
+    e.pixel.size = 1; e.pixel.quantize = true; e.pixel.outline = true;
+    pixels.assign(4 * 4 * 4, 0); pixels[20] = pixels[21] = pixels[22] = pixels[23] = 255;
+    applyRenderEffects(pixels,4,4,{},e);
+    int opaque = 0;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        opaque += pixels[i+3] == 255;
+        CHECK(pixels[i] == 0 || pixels[i] == 255);
+        CHECK(pixels[i] == pixels[i+1] && pixels[i] == pixels[i+2]);
+    }
+    CHECK(opaque == 9);
+    Skeleton sk;
+    sk.addBone("root", -1, {}, 0);
+    sk.effects = e; sk.effects.light.enabled = true;
+    std::string error;
+    Skeleton loaded;
+    CHECK(toJson(sk,-1).find("\"version\":7") != std::string::npos);
+    CHECK(fromJson(toJson(sk), loaded, &error) && loaded.effects == sk.effects);
+    CHECK(toBinary(sk)[4] == 7 && fromBinary(toBinary(sk), loaded, &error) && loaded.effects == sk.effects);
+    Skeleton empty;
+    mergeSkeleton(empty, sk); CHECK(empty.effects == sk.effects);
+    sk.effects.light.radius = 0;
+    CHECK(!validateSkeleton(sk,&error));
+    const std::string before = toJson(loaded);
+    CHECK(!fromJson(toJson(sk),loaded,&error) && toJson(loaded) == before);
+    sk.effects = e; sk.effects.pixel.palette.resize(257, {0,0,0});
+    CHECK(!fromJson(toJson(sk),loaded,&error));
+    sk.effects = {};
+    CHECK(toJson(sk,-1).find("\"version\":5") != std::string::npos);
+    sk.images.push_back({"",2,2});
+    Attachment a; a.name = "image"; a.image = 0;
+    Slot slot; slot.name = "slot"; slot.bone = 0; slot.activeAttachment = 0; slot.attachments.push_back(a); sk.slots.push_back(slot);
+    sk.effects.light.enabled = true; sk.effects.light.intensity = sk.effects.light.ambient = 0;
+    std::vector<unsigned char> whiteTexture{255,255,255,255};
+    pixels.assign(5 * 5 * 4, 255);
+    for (size_t i = 0; i < pixels.size(); i += 4) { pixels[i] = 200; pixels[i+1] = pixels[i+2] = 0; }
+    renderPose(sk,makeSetupPose(sk),{{1,1,whiteTexture.data()}},{1,0,0,-1,2,2},5,5,pixels);
+    CHECK(pixels[0] == 200 && pixels[3] == 255); // Background is not lit or quantized.
+    CHECK(pixels[(2 * 5 + 2) * 4] == 0 && pixels[(2 * 5 + 2) * 4 + 3] == 255);
+}
+
+static void testComponentKeys() {
+    Skeleton sk = makeArm();
+    Slot slot; slot.name = "tint"; sk.slots.push_back(slot);
+    Animation anim; anim.name = "components"; anim.duration = 3;
+    setTranslateKey(anim,0,0,{0,0}); setTranslateKey(anim,0,1,{10,20});
+    editComponentCurve(anim.bones[0].translate[0],0) = CurveShape::stepped();
+    Vec2 sampled = sample(anim.bones[0].translate,0.5f,{});
+    CHECK(near(sampled,{0,10}));
+    CHECK(moveComponentKey(anim,0,Channel::Translate,0,1,2));
+    CHECK(anim.bones[0].translate[1].componentMask == 2);
+    CHECK(anim.bones[0].translate[2].componentMask == 1);
+    CHECK(near(sample(anim.bones[0].translate,1.5f,{}),{0,20}));
+    editComponentCurve(anim.bones[0].translate[0],0) = CurveShape::linear();
+    CHECK(near(sample(anim.bones[0].translate,1,{}),{5,20}));
+    CHECK(!moveComponentKey(anim,0,Channel::Translate,0,0,2));
+    CHECK(setComponentKey(anim,0,Channel::Translate,1,3,99));
+    moveChannelKey(anim,0,Channel::Translate,2,3);
+    CHECK(anim.bones[0].translate.back().componentMask == 3 && near(anim.bones[0].translate.back().value,{10,99}));
+    CHECK(removeComponentKey(anim,0,Channel::Translate,0,3));
+    CHECK(anim.bones[0].translate.back().componentMask == 2);
+    CHECK(!removeComponentKey(anim,0,Channel::Translate,0,3));
+    CHECK(!setComponentKey(anim,0,Channel::Translate,2,0,4));
+    CHECK(!setComponentKey(anim,0,Channel::Translate,0,-1,4));
+    CHECK(!setComponentKey(anim,0,Channel::Color,4,0,4));
+    CHECK(!setComponentKey(anim,0,Channel::Color,0,0,std::numeric_limits<float>::infinity()));
+
+    Animation source; source.name = "source"; setComponentKey(source,0,Channel::Translate,0,0,7);
+    copyKey(source,anim,0,Channel::Translate,-1,0,3);
+    CHECK(anim.bones[0].translate.back().componentMask == 3 && near(anim.bones[0].translate.back().value,{7,99}));
+    setKeyCurve(anim,0,Channel::Translate,0,CurveShape::stepped());
+    CHECK(componentCurve(anim.bones[0].translate.front(),0).type == Curve::Stepped);
+    CHECK(componentCurve(anim.bones[0].translate.front(),1).type == Curve::Stepped);
+
+    setColorKey(anim,0,0,Color{0,0,0,0}); setColorKey(anim,0,2,Color{1,1,1,1});
+    editComponentCurve(anim.slots[0].color[0],3) = CurveShape::stepped();
+    Color color = sample(anim.slots[0].color,1,Color{});
+    CHECK(near(color[0],0.5f) && near(color[1],0.5f) && near(color[3],0));
+    CHECK(moveComponentKey(anim,0,Channel::Color,3,2,3));
+    CHECK(anim.slots[0].color[1].componentMask == 7 && anim.slots[0].color[2].componentMask == 8);
+
+    Animation lower, upper;
+    setTranslateKey(lower,0,0,{3,40}); setRotateKey(lower,0,0,15);
+    setColorKey(lower,0,0,Color{0.25f,0.5f,0.75f,1});
+    setComponentKey(upper,0,Channel::Translate,0,0,12);
+    setComponentKey(upper,0,Channel::Color,3,0,0.2f);
+    Pose layered = makeSetupPose(sk); applyAnimationMix(sk,lower,0,1,layered); applyAnimationMix(sk,upper,0,1,layered);
+    CHECK(near(layered.local[0].x,12) && near(layered.local[0].y,40) && near(layered.local[0].rotation,15));
+    CHECK(near(layered.slotColor[0][0],0.25f) && near(layered.slotColor[0][2],0.75f) && near(layered.slotColor[0][3],0.2f));
+
+    sk.animations = {anim,source};
+    CHECK(usesComponentKeys(sk));
+    std::string error; Skeleton loaded;
+    const auto text = toJson(sk,-1);
+    const bool restored = fromJson(text,loaded,&error); CHECK(restored);
+    if (restored) {
+        CHECK(usesComponentKeys(loaded));
+        CHECK(loaded.animations[0].slots[0].color[0].separatedCurves);
+        CHECK(loaded.animations[0].slots[0].color[2].componentMask == 8);
+        CHECK(near(sample(loaded.animations[0].slots[0].color,1,Color{})[3],0));
+    }
+    std::string broken = text;
+    auto at = broken.find("\"components\":1"); CHECK(at != std::string::npos);
+    if (at != std::string::npos) { broken.replace(at,14,"\"components\":0"); CHECK(!fromJson(broken,loaded,&error)); }
+    sk.animations[0].bones[0].translate[0].componentMask = 0;
+    CHECK(!validateSkeleton(sk,&error));
+    sk.animations[0].bones[0].translate[0].componentMask = 3;
+    auto& invalid = editComponentCurve(sk.animations[0].bones[0].translate[0],0); invalid.cx1 = std::numeric_limits<float>::infinity();
+    CHECK(!validateSkeleton(sk,&error));
+    Skeleton legacy = makeArm(); Animation old; old.name = "legacy"; setTranslateKey(old,0,0,{1,2}); legacy.animations = {old};
+    CHECK(!usesComponentKeys(legacy)); CHECK(fromJson(toJson(legacy),loaded,&error));
+    CHECK(loaded.animations[0].bones[0].translate[0].componentMask == 3 && !loaded.animations[0].bones[0].translate[0].separatedCurves);
+}
+
 int main() {
+    testComponentKeys();
+    testRenderEffects();
     testWorldTransforms();
     testAnimationSampling();
     testReparentKeepsWorld();
@@ -1309,8 +1537,10 @@ int main() {
     testCopyPaste();
     testMirrorWeights();
     testSkins();
+    testLinkedMeshesAndSkinDeforms();
     testAtlas();
     testRaster();
+    testBlendModes();
     testBinaryAndRounding();
     testMerge();
     testPsd();

@@ -1,6 +1,7 @@
 // Graph view: value-over-time curves of the selected bone (or slot colour), Bezier handles,
 // zoom and pan.
 #include "editor/editor.h"
+#include "editor/i18n.h"
 
 #include "editor/channels.h"
 #include "editor/icons.h"
@@ -17,13 +18,12 @@ namespace {
 struct CurveDef {
     Channel channel;
     int comp;  // 0 = x, 1 = y (ignored for rotate)
-    const char* name;
 };
 constexpr CurveDef kCurves[] = {
-    {Channel::Rotate, 0, "旋转"},  {Channel::Translate, 0, "移动 X"}, {Channel::Translate, 1, "移动 Y"},
-    {Channel::Scale, 0, "缩放 X"}, {Channel::Scale, 1, "缩放 Y"},     {Channel::Shear, 0, "斜切 X"},
-    {Channel::Shear, 1, "斜切 Y"},  {Channel::Color, 0, "红"},     {Channel::Color, 1, "绿"},
-    {Channel::Color, 2, "蓝"},     {Channel::Color, 3, "透明度"},
+    {Channel::Rotate, 0}, {Channel::Translate, 0}, {Channel::Translate, 1},
+    {Channel::Scale, 0}, {Channel::Scale, 1}, {Channel::Shear, 0},
+    {Channel::Shear, 1}, {Channel::Color, 0}, {Channel::Color, 1},
+    {Channel::Color, 2}, {Channel::Color, 3},
 };
 constexpr int kCurveCount = (int)(sizeof(kCurves) / sizeof(kCurves[0]));
 
@@ -32,28 +32,34 @@ struct Access {
     std::vector<FloatKey>* f = nullptr;
     std::vector<Vec2Key>* v = nullptr;
     std::vector<ColorKey>* c = nullptr;
+    std::vector<size_t> indices;
     int comp = 0;
+    float fallback = 0;
 
-    size_t size() const { return f ? f->size() : v ? v->size() : c ? c->size() : 0; }
-    float time(size_t i) const { return f ? (*f)[i].time : v ? (*v)[i].time : (*c)[i].time; }
+    bool present() const { return f || v || c; }
+    size_t size() const { return f ? f->size() : indices.size(); }
+    size_t key(size_t i) const { return f ? i : indices[i]; }
+    float time(size_t i) const { return f ? (*f)[i].time : v ? (*v)[key(i)].time : (*c)[key(i)].time; }
     float value(size_t i) const {
         if (f) return (*f)[i].value;
-        if (v) return comp ? (*v)[i].value.y : (*v)[i].value.x;
-        return (*c)[i].value[comp];
+        if (v) return comp ? (*v)[key(i)].value.y : (*v)[key(i)].value.x;
+        return (*c)[key(i)].value[comp];
     }
     void setValue(size_t i, float x) {
         if (f) (*f)[i].value = x;
-        else if (v) (comp ? (*v)[i].value.y : (*v)[i].value.x) = x;
-        else (*c)[i].value[comp] = std::clamp(x, 0.0f, 1.0f);
+        else if (v) (comp ? (*v)[key(i)].value.y : (*v)[key(i)].value.x) = x;
+        else (*c)[key(i)].value[comp] = std::clamp(x, 0.0f, 1.0f);
     }
-    CurveShape& curve(size_t i) { return f ? (*f)[i].curve : v ? (*v)[i].curve : (*c)[i].curve; }
+    const CurveShape& curve(size_t i) const { return f ? (*f)[i].curve : v ? componentCurve((*v)[key(i)],comp) : componentCurve((*c)[key(i)],comp); }
+    CurveShape& editCurve(size_t i) { return f ? (*f)[i].curve : v ? editComponentCurve((*v)[key(i)],comp) : editComponentCurve((*c)[key(i)],comp); }
     float sampleAt(float t) const {
-        if (f) return sample(*f, t, 0.0f);
+        if (f) return sample(*f, t, fallback);
         if (v) {
-            Vec2 s = sample(*v, t, Vec2{});
+            Vec2 s = sample(*v, t, Vec2{fallback,fallback});
             return comp ? s.y : s.x;
         }
-        return sample(*c, t, Color())[comp];
+        Color base; base[comp] = fallback;
+        return sample(*c, t, base)[comp];
     }
     int indexAt(float t) const {
         for (size_t i = 0; i < size(); ++i)
@@ -66,13 +72,17 @@ struct Access {
 struct Source {
     BoneTimeline* bone = nullptr;
     SlotTimeline* slot = nullptr;
+    Color setupColor;
 };
 
 Access access(const Source& src, const CurveDef& c) {
     Access a;
     a.comp = c.comp;
+    a.fallback = c.channel == Channel::Scale || c.channel == Channel::Color ? 1.0f : 0.0f;
     if (c.channel == Channel::Color) {
+        a.fallback = src.setupColor[c.comp];
         if (src.slot) a.c = &src.slot->color;
+        if (a.c) for (size_t i = 0; i < a.c->size(); ++i) if ((*a.c)[i].componentMask & (1u << a.comp)) a.indices.push_back(i);
         return a;
     }
     if (!src.bone) return a;
@@ -83,6 +93,7 @@ Access access(const Source& src, const CurveDef& c) {
     case Channel::Scale: a.v = &tl.scale; break;
     default: a.v = &tl.shear; break;
     }
+    if (a.v) for (size_t i = 0; i < a.v->size(); ++i) if ((*a.v)[i].componentMask & (1u << a.comp)) a.indices.push_back(i);
     return a;
 }
 
@@ -106,6 +117,7 @@ ImU32 curveColor(int id) {
 } // namespace
 
 void Editor::drawGraph() {
+    const char* names[] = {tr("旋转"),tr("移动 X"),tr("移动 Y"),tr("缩放 X"),tr("缩放 Y"),tr("斜切 X"),tr("斜切 Y"),tr("红"),tr("绿"),tr("蓝"),tr("透明度")};
     bool visible = ImGui::Begin("Graph###Graph");
     if (focusGraph_ > 0) {
         ImGui::SetWindowFocus();
@@ -122,16 +134,16 @@ void Editor::drawGraph() {
     Source tl;
     if (an && slotMode) {
         auto it = an->slots.find(sel_.slot);
-        if (it != an->slots.end() && !it->second.color.empty()) tl.slot = &it->second;
+        if (it != an->slots.end() && !it->second.color.empty()) { tl.slot = &it->second; tl.setupColor = sk_.slots[sel_.slot].color; }
     } else if (an && bone >= 0) {
         auto it = an->bones.find(bone);
         if (it != an->bones.end()) tl.bone = &it->second;
     }
     if (!tl.bone && !tl.slot) {
-        ImGui::TextDisabled(!an ? "没有动画。"
-                            : slotMode ? "所选插槽在当前动画里没有颜色关键帧。"
-                            : bone < 0 ? "选择一根骨骼（或插槽，看颜色曲线）。"
-                                       : "所选骨骼在当前动画里没有关键帧。");
+        ImGui::TextDisabled(!an ? tr("没有动画。")
+                            : slotMode ? tr("所选插槽在当前动画里没有颜色关键帧。")
+                            : bone < 0 ? tr("选择一根骨骼（或插槽，看颜色曲线）。")
+                                       : tr("所选骨骼在当前动画里没有关键帧。"));
         ImGui::End();
         return;
     }
@@ -139,11 +151,12 @@ void Editor::drawGraph() {
     ImGuiIO& io = ImGui::GetIO();
     const float fh = ImGui::GetFrameHeight();
 
-    if (graphCurve_ >= 0 && (graphKey_ < 0 || graphKey_ >= (int)access(tl, kCurves[graphCurve_]).size())) graphCurve_ = graphKey_ = -1;
+    if (graphCurve_ >= kCurveCount || (graphCurve_ >= 0 && !access(tl,kCurves[graphCurve_]).present())) graphCurve_ = graphKey_ = -1;
+    if (graphCurve_ >= 0 && (graphKey_ < 0 || graphKey_ >= (int)access(tl, kCurves[graphCurve_]).size())) graphKey_ = -1;
 
     // ---- toolbar: curve presets for the selected key ----
     {
-        bool hasSel = graphCurve_ >= 0;
+        bool hasSel = graphCurve_ >= 0 && graphKey_ >= 0;
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", tl.slot ? sk_.slots[sel_.slot].name.c_str() : sk_.bones[bone].name.c_str());
         ImGui::SameLine(0, 12);
@@ -151,42 +164,59 @@ void Editor::drawGraph() {
         auto preset = [&](const char* label, const CurveShape& c) {
             if (ImGui::Button(label) && hasSel) {
                 checkpoint();
-                access(tl, kCurves[graphCurve_]).curve(graphKey_) = c;
+                access(tl, kCurves[graphCurve_]).editCurve(graphKey_) = c;
             }
             ImGui::SameLine(0, 3);
         };
-        preset("线性", CurveShape::linear());
-        preset("阶梯", CurveShape::stepped());
-        preset("缓入缓出", CurveShape::bezier(0.42f, 0, 0.58f, 1));
-        preset("缓入", CurveShape::bezier(0.42f, 0, 1, 1));
-        preset("缓出", CurveShape::bezier(0, 0, 0.58f, 1));
+        preset(tr("线性"), CurveShape::linear());
+        preset(tr("阶梯"), CurveShape::stepped());
+        preset(tr("缓入缓出"), CurveShape::bezier(0.42f, 0, 0.58f, 1));
+        preset(tr("缓入"), CurveShape::bezier(0.42f, 0, 1, 1));
+        preset(tr("缓出"), CurveShape::bezier(0, 0, 0.58f, 1));
         ImGui::EndDisabled();
         ImGui::SameLine(0, 12);
         if (hasSel) {
             Access a = access(tl, kCurves[graphCurve_]);
-            ImGui::TextDisabled("%s  第 %d 帧  值 %.2f", kCurves[graphCurve_].name, (int)std::round(a.time(graphKey_) * fps_),
+            ImGui::TextDisabled(tr("%s  第 %d 帧  值 %.2f"), names[graphCurve_], (int)std::round(a.time(graphKey_) * fps_),
                                 a.value(graphKey_));
-            if (kCurves[graphCurve_].channel != Channel::Rotate) {
-                ImGui::SameLine();
-                ImGui::TextDisabled(kCurves[graphCurve_].channel == Channel::Color ? "(RGBA 共用同一条曲线形状)" : "(X/Y 共用同一条曲线形状)");
-            }
         } else {
-            ImGui::TextDisabled("点击关键帧，拖手柄调缓动；滚轮缩放时间，Ctrl+滚轮缩放数值，右键拖动平移");
+            ImGui::TextDisabled(tr("点击关键帧，拖手柄调缓动；滚轮缩放时间，Ctrl+滚轮缩放数值，右键拖动平移"));
         }
         ImGui::SameLine(0, 12);
-        if (ImGui::SmallButton("适配")) {
+        if (ImGui::SmallButton(tr("适配"))) {
             graphPps_ = 0;
             graphScroll_ = 0;
             graphAutoY_ = true;
         }
     }
+    ImGui::BeginDisabled(graphCurve_ < 0);
+    if (ImGui::Button(tr("打所选分量关键帧"))) {
+        const auto& curve = kCurves[graphCurve_];
+        auto a = access(tl,curve); float value = a.sampleAt(time_);
+        if (curve.channel == Channel::Color) value = std::clamp(value,0.0f,1.0f);
+        checkpoint();
+        if (curve.channel == Channel::Rotate) setRotateKey(*an,keyIndex,time_,value);
+        else setComponentKey(*an,keyIndex,curve.channel,curve.comp,time_,value);
+        graphKey_ = access(tl,curve).indexAt(time_); updatePose();
+    }
+    ImGui::EndDisabled(); ImGui::SameLine();
+    ImGui::BeginDisabled(graphCurve_ < 0 || graphKey_ < 0);
+    if (ImGui::Button(tr("删除所选分量关键帧"))) {
+        const auto& curve = kCurves[graphCurve_]; auto a = access(tl,curve);
+        checkpoint();
+        if (curve.channel == Channel::Rotate) removeKey(*an,keyIndex,curve.channel,a.time(graphKey_));
+        else removeComponentKey(*an,keyIndex,curve.channel,curve.comp,a.time(graphKey_));
+        graphKey_ = -1; updatePose(); ImGui::EndDisabled(); ImGui::End(); return;
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped(tr("分量可独立打帧、移动和调整缓动。"));
 
     // ---- curve list ----
-    float listW = ImGui::GetFontSize() * 7;
+    float listW = ImGui::GetFontSize() * 10;
     ImGui::BeginChild("##curves", ImVec2(listW, 0), ImGuiChildFlags_Borders);
     for (int id = 0; id < kCurveCount; ++id) {
         Access a = access(tl, kCurves[id]);
-        if (a.size() == 0) continue;
+        if (!a.present()) continue;
         ImGui::PushID(id);
         bool shown = !(graphHidden_ & (1u << id));
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -194,7 +224,12 @@ void Editor::drawGraph() {
         ImGui::GetWindowDrawList()->AddRectFilled(p + ImVec2(2, h * 0.3f), p + ImVec2(h - 2, h * 0.7f), curveColor(id));
         ImGui::Dummy(ImVec2(h, h));
         ImGui::SameLine();
-        if (ImGui::Checkbox(kCurves[id].name, &shown)) graphHidden_ ^= (1u << id);
+        if (ImGui::Checkbox("##show", &shown)) graphHidden_ ^= (1u << id);
+        ImGui::SameLine();
+        if (ImGui::Selectable(names[id],graphCurve_ == id)) {
+            graphCurve_ = id; graphKey_ = a.indexAt(time_);
+            if (graphKey_ < 0 && a.size()) graphKey_ = 0;
+        }
         ImGui::PopID();
     }
     ImGui::EndChild();
@@ -323,7 +358,7 @@ void Editor::drawGraph() {
         return ImVec2(tx(t0 + hx * (t1 - t0)), vy(v0 + hy * dv));
     };
     bool selHasNext = false;
-    if (graphCurve_ >= 0) {
+    if (graphCurve_ >= 0 && graphKey_ >= 0) {
         Access a = access(tl, kCurves[graphCurve_]);
         selHasNext = graphKey_ + 1 < (int)a.size() && a.curve(graphKey_).type != Curve::Stepped;
     }
@@ -338,7 +373,8 @@ void Editor::drawGraph() {
         }
         if (graphDrag_.kind == GraphDrag::None) {
             float best = 8;
-            for (int id = 0; id < kCurveCount; ++id) {
+            for (int offset = 0; offset < kCurveCount; ++offset) {
+                const int id = (offset + std::max(graphCurve_,0)) % kCurveCount;
                 if (graphHidden_ & (1u << id)) continue;
                 Access a = access(tl, kCurves[id]);
                 for (size_t k = 0; k < a.size(); ++k) {
@@ -376,7 +412,9 @@ void Editor::drawGraph() {
             float from = a.time(graphKey_);
             float to = std::clamp(io.KeyShift ? xt(mouse.x) : snapTime(xt(mouse.x)), 0.0f, an->duration);
             if (std::fabs(to - from) > kKeyEpsilon && a.indexAt(to) < 0) {
-                moveChannelKey(*an, keyIndex, kCurves[graphCurve_].channel, from, to);
+                const auto& curve = kCurves[graphCurve_];
+                if (curve.channel == Channel::Rotate) moveChannelKey(*an,keyIndex,curve.channel,from,to);
+                else moveComponentKey(*an,keyIndex,curve.channel,curve.comp,from,to);
                 graphKey_ = access(tl, kCurves[graphCurve_]).indexAt(to);
             }
             setTime(access(tl, kCurves[graphCurve_]).time(graphKey_));
@@ -385,7 +423,7 @@ void Editor::drawGraph() {
             Access a = access(tl, kCurves[graphCurve_]);
             float t0 = a.time(graphKey_), t1 = a.time(graphKey_ + 1), v0 = a.value(graphKey_), v1 = a.value(graphKey_ + 1);
             float dv = std::fabs(v1 - v0) > 1e-5f ? v1 - v0 : (vmax - vmin) * 0.25f;
-            CurveShape& c = a.curve(graphKey_);
+            CurveShape& c = a.editCurve(graphKey_);
             if (c.type != Curve::Bezier) c = CurveShape::bezier(1 / 3.0f, 1 / 3.0f, 2 / 3.0f, 2 / 3.0f);
             float hx = std::clamp((xt(mouse.x) - t0) / (t1 - t0), 0.0f, 1.0f);
             float hy = (yv(mouse.y) - v0) / dv;
@@ -446,6 +484,6 @@ void Editor::drawGraph() {
     dl->AddLine(ImVec2(px, origin.y), ImVec2(px, plotHi.y), theme::kPlayhead, 1.5f);
     dl->AddTriangleFilled(ImVec2(px - 6, origin.y), ImVec2(px + 6, origin.y), ImVec2(px, origin.y + 8), theme::kPlayhead);
     if (hovered && graphDrag_.kind == GraphDrag::None)
-        ImGui::SetItemTooltip("左键：选关键帧 / 拖动改时间和数值（Shift 不吸附）；拖黄色手柄调整缓动");
+        ImGui::SetItemTooltip(tr("左键：选关键帧 / 拖动改时间和数值（Shift 不吸附）；拖黄色手柄调整缓动"));
     ImGui::End();
 }
